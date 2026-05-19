@@ -306,19 +306,7 @@ def render_ai_recommend():
             fname = st.session_state.ai_uploaded_filename
             st.info(f"📄 Using previously uploaded file: **{fname}** ({len(file_columns)} columns)")
     else:
-        # Fabric Connector UI
-        # ── Step 1: Item type ────────────────────────────────────────────
-        f_item_type = st.radio(
-            "Item Type",
-            ["Warehouse", "Lakehouse"],
-            index=0 if st.session_state.ai_state["f_item_type"] != "Lakehouse" else 1,
-            horizontal=True,
-            key="ai_f_item_type_input",
-            on_change=sync_ai_f_item_type,
-        )
-        use_rest_api = True  # always use REST API; ODBC only as last resort
-
-        # ── Step 2: Browse Workspaces ─────────────────────────────────────
+        # ── Fabric Connector UI ───────────────────────────────────────────
         from backend.fabric_connector import FabricConnector as _FC
         creds = st.session_state.connector_creds
         t_id, c_id, c_sec = _resolve_fabric_creds(creds)
@@ -326,23 +314,18 @@ def render_ai_recommend():
         if not all([t_id, c_id, c_sec]):
             st.warning("⚠️ Enter Tenant ID, Client ID, and Client Secret in the Purview tab first.")
         else:
-            # Load workspaces once per session
-            if 'ai_fabric_workspaces' not in st.session_state:
-                st.session_state.ai_fabric_workspaces = []
-            if not st.session_state.ai_fabric_workspaces:
+            # ── Step 1: Select Workspace ──────────────────────────────────
+            if 'ai_fabric_workspaces' not in st.session_state or not st.session_state.ai_fabric_workspaces:
                 with st.spinner("Loading workspaces..."):
                     try:
-                        _conn = _FC(t_id, c_id, c_sec)
-                        st.session_state.ai_fabric_workspaces = _conn.list_workspaces()
+                        st.session_state.ai_fabric_workspaces = _FC(t_id, c_id, c_sec).list_workspaces()
                     except Exception as _e:
                         st.error(f"❌ Could not load workspaces: {_e}")
 
-            workspaces = st.session_state.ai_fabric_workspaces
+            workspaces = st.session_state.get('ai_fabric_workspaces', [])
             if workspaces:
                 ws_names = [w.get("displayName", w.get("id", "")) for w in workspaces]
                 ws_ids   = [w.get("id", "") for w in workspaces]
-
-                # Default to saved workspace if still valid
                 saved_ws_id = st.session_state.ai_state["f_workspace_id"]
                 default_ws_idx = ws_ids.index(saved_ws_id) if saved_ws_id in ws_ids else 0
 
@@ -350,43 +333,45 @@ def render_ai_recommend():
                 selected_ws_id   = ws_ids[ws_names.index(selected_ws_name)]
                 st.session_state.ai_state["f_workspace_id"] = selected_ws_id
 
-                # ── Step 3: Browse Items in selected workspace ────────────
-                item_cache_key = f"ai_fabric_items_{selected_ws_id}_{f_item_type}"
-                if item_cache_key not in st.session_state:
-                    st.session_state[item_cache_key] = []
-                if not st.session_state[item_cache_key]:
-                    with st.spinner(f"Loading {f_item_type}s..."):
+                # ── Step 2: Select Data Item (Warehouse or Lakehouse) ─────
+                item_cache_key = f"ai_fabric_items_{selected_ws_id}"
+                if item_cache_key not in st.session_state or not st.session_state[item_cache_key]:
+                    with st.spinner("Loading warehouses and lakehouses..."):
                         try:
-                            _conn = _FC(t_id, c_id, c_sec)
-                            st.session_state[item_cache_key] = _conn.list_items(selected_ws_id, f_item_type)
+                            st.session_state[item_cache_key] = _FC(t_id, c_id, c_sec).list_data_items(selected_ws_id)
                         except Exception as _e:
-                            st.error(f"❌ Could not load {f_item_type}s: {_e}")
+                            st.error(f"❌ {_e}")
 
-                items = st.session_state[item_cache_key]
+                items = st.session_state.get(item_cache_key, [])
                 if items:
-                    item_names = [i.get("displayName", i.get("id", "")) for i in items]
-                    item_ids   = [i.get("id", "") for i in items]
+                    # Show name + type label so user can tell them apart
+                    item_labels = [f"{i.get('displayName', i.get('id',''))}  ({i.get('type','?')})" for i in items]
+                    item_ids    = [i.get("id", "") for i in items]
+                    item_types  = [i.get("type", "Warehouse") for i in items]
 
                     saved_item_id = st.session_state.ai_state["f_item_id"]
                     default_item_idx = item_ids.index(saved_item_id) if saved_item_id in item_ids else 0
 
-                    selected_item_name = st.selectbox(f"{f_item_type}", item_names, index=default_item_idx, key="ai_item_sel")
-                    selected_item_id   = item_ids[item_names.index(selected_item_name)]
-                    st.session_state.ai_state["f_item_id"] = selected_item_id
+                    selected_label    = st.selectbox("Warehouse / Lakehouse", item_labels, index=default_item_idx, key="ai_item_sel")
+                    sel_idx           = item_labels.index(selected_label)
+                    selected_item_id  = item_ids[sel_idx]
+                    f_item_type       = item_types[sel_idx]
+                    st.session_state.ai_state["f_item_id"]   = selected_item_id
+                    st.session_state.ai_state["f_item_type"] = f_item_type
                 else:
-                    st.info(f"No {f_item_type}s found in this workspace.")
                     selected_item_id = ""
+                    f_item_type      = st.session_state.ai_state.get("f_item_type", "Warehouse")
 
         # Fetch Tables button
+        ws_id   = st.session_state.ai_state.get("f_workspace_id", "")
+        item_id = st.session_state.ai_state.get("f_item_id", "")
+        f_item_type = st.session_state.ai_state.get("f_item_type", "Warehouse")
+
         fetch_col, _ = st.columns([1, 3])
         with fetch_col:
             fetch_clicked = st.button("🔍 Fetch Tables", key="ai_fetch_tables_btn")
 
-        ws_id   = st.session_state.ai_state.get("f_workspace_id", "")
-        item_id = st.session_state.ai_state.get("f_item_id", "")
-
-        # Clear tables when selection changes
-        conn_key = f"{ws_id}|{item_id}|{f_item_type}"
+        conn_key = f"{ws_id}|{item_id}"
         if st.session_state.get('prev_f_sql') != conn_key:
             st.session_state.ai_fabric_tables = []
             st.session_state.prev_f_sql = conn_key
@@ -395,18 +380,17 @@ def render_ai_recommend():
             if not all([t_id, c_id, c_sec]):
                 st.error("❌ Credentials missing. Enter them in the Purview tab.")
             elif not ws_id or not item_id:
-                st.error("❌ Please select a workspace and item above.")
+                st.error("❌ Please select a workspace and warehouse/lakehouse above.")
             else:
                 with st.spinner(f"Fetching tables from {f_item_type}..."):
                     try:
-                        connector = _FC(t_id, c_id, c_sec)
-                        tables = connector.list_tables_via_api(ws_id, item_id, item_type=f_item_type.lower())
+                        tables = _FC(t_id, c_id, c_sec).list_tables_via_api(ws_id, item_id, item_type=f_item_type.lower())
                         st.session_state.ai_fabric_tables = tables
                         if tables:
                             st.success(f"✅ Found {len(tables)} table(s).")
                             st.rerun()
                         else:
-                            st.warning("No tables found. The item may be empty or the Service Principal needs Workspace Member access.")
+                            st.warning("No tables found. The item may be empty or the Service Principal may need Workspace Member access.")
                     except Exception as e:
                         st.warning(f"⚠️ {e}")
                         st.info("Enter the table name manually below.")

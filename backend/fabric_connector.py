@@ -91,10 +91,25 @@ class FabricConnector:
             return resp.json().get("value", [])
         raise Exception(f"Could not list workspaces ({resp.status_code}): {resp.json().get('message', resp.text)}")
 
-    def list_items(self, workspace_id: str, item_type: str):
-        """Return list of dicts with 'id' and 'displayName' for Lakehouses or Warehouses in a workspace.
-        item_type: 'Lakehouse' or 'Warehouse'
+    def list_data_items(self, workspace_id: str):
+        """Return all Warehouses and Lakehouses in a workspace as a combined list.
+        Each entry has 'id', 'displayName', and 'type' ('Warehouse' or 'Lakehouse').
         """
+        self._ensure_token()
+        items = []
+        for item_type in ("Warehouse", "Lakehouse"):
+            url = f"{self.base_url}/workspaces/{workspace_id}/items?type={item_type}"
+            resp = requests.get(url, headers=self._headers(), timeout=30)
+            if resp.status_code == 200:
+                for i in resp.json().get("value", []):
+                    i["type"] = item_type   # ensure type is set
+                    items.append(i)
+        if not items:
+            raise Exception("No Warehouses or Lakehouses found in this workspace. Check that the Service Principal has Workspace Member access.")
+        return items
+
+    def list_items(self, workspace_id: str, item_type: str):
+        """Return list of dicts for a specific item type (kept for backwards compat)."""
         self._ensure_token()
         url = f"{self.base_url}/workspaces/{workspace_id}/items?type={item_type}"
         resp = requests.get(url, headers=self._headers(), timeout=30)
