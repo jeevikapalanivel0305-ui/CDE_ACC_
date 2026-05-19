@@ -208,10 +208,14 @@ def render_ai_recommend():
             "industry": "General",
             "connector": "Excel",
             "f_sql": "",
+            "f_db": "",
             "f_tab_sel": "--- Select Table ---",
             "f_tab_text": "",
             "requirement": ""
         }
+    # Back-fill f_db if missing from older session state
+    if "f_db" not in st.session_state.ai_state:
+        st.session_state.ai_state["f_db"] = ""
 
     def sync_ai_industry():
         st.session_state.ai_state["industry"] = st.session_state.ai_selected_industry
@@ -219,6 +223,8 @@ def render_ai_recommend():
         st.session_state.ai_state["connector"] = st.session_state.ai_connector_type
     def sync_ai_f_sql():
         st.session_state.ai_state["f_sql"] = st.session_state.ai_f_sql_input
+    def sync_ai_f_db():
+        st.session_state.ai_state["f_db"] = st.session_state.ai_f_db_input
     def sync_ai_f_tab_sel():
         st.session_state.ai_state["f_tab_sel"] = st.session_state.ai_f_tab_sel_ref
     def sync_ai_f_tab_text():
@@ -275,32 +281,49 @@ def render_ai_recommend():
             fname = st.session_state.ai_uploaded_filename
             st.info(f"📄 Using previously uploaded file: **{fname}** ({len(file_columns)} columns)")
     else:
-        # Fabric Connector UI - Simplified without the grey box and refresh button
+        # Fabric Connector UI
         f_sql_val = st.session_state.ai_state["f_sql"] if st.session_state.ai_state["f_sql"] else st.session_state.connector_creds.get('fabric_sql_endpoint', '')
-        f_sql = st.text_input("SQL Endpoint / Connection String", 
-                             value=f_sql_val, 
-                             type="password",
-                             key="ai_f_sql_input", 
-                             on_change=sync_ai_f_sql)
-        
-        
-        # Clear tables if connection string changes
-        if 'prev_f_sql' not in st.session_state or st.session_state.prev_f_sql != f_sql:
-            st.session_state.ai_fabric_tables = []
-            st.session_state.prev_f_sql = f_sql
+        col_sql, col_db = st.columns([3, 1])
+        with col_sql:
+            f_sql = st.text_input("SQL Endpoint / Connection String",
+                                 value=f_sql_val,
+                                 type="password",
+                                 key="ai_f_sql_input",
+                                 on_change=sync_ai_f_sql)
+        with col_db:
+            f_db = st.text_input("Database Name",
+                                 value=st.session_state.ai_state["f_db"],
+                                 placeholder="e.g. MyLakehouse",
+                                 key="ai_f_db_input",
+                                 on_change=sync_ai_f_db)
+        f_db_val = f_db.strip() if f_db and f_db.strip() else None
 
-        # Trigger fetch automatically if endpoint is provided and list is empty
-        if f_sql and not st.session_state.get('ai_fabric_tables'):
-            with st.spinner("Analyzing..."):
+        # Clear tables if connection string or database changes
+        conn_key = f"{f_sql}|{f_db_val}"
+        if 'prev_f_sql' not in st.session_state or st.session_state.prev_f_sql != conn_key:
+            st.session_state.ai_fabric_tables = []
+            st.session_state.prev_f_sql = conn_key
+
+        # Fetch Tables button — explicit trigger so errors are visible
+        fetch_col, _ = st.columns([1, 3])
+        with fetch_col:
+            fetch_clicked = st.button("🔍 Fetch Tables", key="ai_fetch_tables_btn")
+        if fetch_clicked and f_sql:
+            with st.spinner("Connecting to Fabric and listing tables..."):
                 try:
                     from backend.fabric_connector import FabricConnector
                     creds = st.session_state.connector_creds
                     connector = FabricConnector(creds.get('fabric_tenant_id', ''), creds.get('fabric_client_id', ''), creds.get('fabric_client_secret', ''))
-                    tables = connector.list_tables(f_sql, database_name="w1")
+                    tables = connector.list_tables(f_sql, database_name=f_db_val)
                     st.session_state.ai_fabric_tables = tables
-                    if tables: st.rerun()
-                except Exception:
-                    pass
+                    if tables:
+                        st.success(f"✅ Found {len(tables)} table(s).")
+                        st.rerun()
+                    else:
+                        st.warning("No tables found. Check database name and permissions.")
+                except Exception as e:
+                    st.error(f"❌ Could not list tables: {str(e)}")
+                    st.info("Enter the table name manually below to proceed.")
 
         # Conditional Display: Dropdown vs Text Input
         fabric_tables = st.session_state.get('ai_fabric_tables', [])
@@ -319,13 +342,14 @@ def render_ai_recommend():
                     from backend.fabric_connector import FabricConnector
                     creds = st.session_state.connector_creds
                     connector = FabricConnector(creds.get('fabric_tenant_id', ''), creds.get('fabric_client_id', ''), creds.get('fabric_client_secret', ''))
-                    schema = connector.fetch_table_schema(f_sql, fabric_table, database_name="w1")
+                    schema = connector.fetch_table_schema(f_sql, fabric_table, database_name=f_db_val)
                     if schema:
                         st.session_state.ai_discovered_cols = [c['name'] for c in schema]
                         st.session_state.prev_ai_f_tab = fabric_table
                     else:
                         st.session_state.ai_discovered_cols = []
-                except Exception:
+                except Exception as e:
+                    st.warning(f"Could not fetch columns for '{fabric_table}': {str(e)} — AI will infer CDEs from the table name.")
                     st.session_state.ai_discovered_cols = []
 
     # Business Requirement Input (optional when file is uploaded)
@@ -349,25 +373,30 @@ def render_ai_recommend():
             if not f_sql or not fabric_table:
                 st.error("Please provide both SQL Endpoint and Table Name.")
                 return
-            
-            with st.spinner("Analyzing..."):
-                try:
-                    from backend.fabric_connector import FabricConnector
-                    creds = st.session_state.connector_creds
-                    connector = FabricConnector(
-                        creds.get('fabric_tenant_id', ''),
-                        creds.get('fabric_client_id', ''),
-                        creds.get('fabric_client_secret', '')
-                    )
-                    schema = connector.fetch_table_schema(f_sql, fabric_table, database_name="w1")
-                    if schema:
-                        cols_to_analyze = [c['name'] for c in schema]
-                    else:
-                        st.error("Could not fetch table schema.")
-                        return
-                except Exception as e:
-                    st.error(f"Fabric Error: {str(e)}")
-                    return
+
+            # Use already-discovered columns if available for this table
+            if st.session_state.get('prev_ai_f_tab') == fabric_table and st.session_state.get('ai_discovered_cols'):
+                cols_to_analyze = st.session_state.ai_discovered_cols
+            else:
+                with st.spinner("Fetching table schema from Fabric..."):
+                    try:
+                        from backend.fabric_connector import FabricConnector
+                        creds = st.session_state.connector_creds
+                        connector = FabricConnector(
+                            creds.get('fabric_tenant_id', ''),
+                            creds.get('fabric_client_id', ''),
+                            creds.get('fabric_client_secret', '')
+                        )
+                        schema = connector.fetch_table_schema(f_sql, fabric_table, database_name=f_db_val)
+                        if schema:
+                            cols_to_analyze = [c['name'] for c in schema]
+                            st.session_state.ai_discovered_cols = cols_to_analyze
+                        else:
+                            st.warning("Schema not available — AI will infer CDEs from the table name.")
+                            cols_to_analyze = []
+                    except Exception as e:
+                        st.warning(f"Could not fetch schema ({str(e)}) — AI will infer CDEs from the table name.")
+                        cols_to_analyze = []
         
         if not cols_to_analyze and not requirement:
             st.warning("Please upload a file or enter a business requirement to analyze.")
