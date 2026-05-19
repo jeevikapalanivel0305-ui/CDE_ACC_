@@ -215,39 +215,87 @@ class FabricConnector:
 
         raise Exception(f"Query API error {resp.status_code}: {resp.json().get('message', resp.text)}")
 
+    def _get_item_sql_endpoint(self, workspace_id: str, item_id: str, item_type: str):
+        """Get the SQL connection string from a Fabric item's properties."""
+        self._ensure_token()
+        item_type_lower = item_type.lower()
+
+        if "warehouse" in item_type_lower:
+            url = f"{self.base_url}/workspaces/{workspace_id}/warehouses/{item_id}"
+        elif "lakehouse" in item_type_lower:
+            url = f"{self.base_url}/workspaces/{workspace_id}/lakehouses/{item_id}"
+        else:
+            url = f"{self.base_url}/workspaces/{workspace_id}/items/{item_id}"
+
+        resp = requests.get(url, headers=self._headers(), timeout=30)
+        if resp.status_code != 200:
+            return None
+
+        props = resp.json().get("properties", {})
+        # Warehouse: properties.connectionString
+        conn_str = props.get("connectionString") or props.get("connectionInfo")
+        if conn_str:
+            return conn_str
+        # Lakehouse: properties.sqlEndpointProperties.connectionString
+        sep = props.get("sqlEndpointProperties", {})
+        return sep.get("connectionString") or None
+
     def list_tables_via_api(self, workspace_id: str, item_id: str, item_type: str = "lakehouse"):
-        """List tables from a Fabric item using the REST API.
-        Lakehouse  → dedicated /tables REST endpoint.
-        Warehouse  → INFORMATION_SCHEMA query via Fabric querydata API.
+        """List tables from a Fabric item.
+        Strategy:
+          1. Get SQL endpoint from item properties → ODBC with access token
+          2. Fallback: REST /lakehouses/{id}/tables (non-schema lakehouses)
+          3. Fallback: REST querydata API
         """
         self._ensure_token()
         workspace_id = workspace_id.strip()
         item_id = item_id.strip()
-
         item_type_lower = item_type.lower()
 
-        if item_type_lower == "lakehouse":
-            url = f"{self.base_url}/workspaces/{workspace_id}/lakehouses/{item_id}/tables"
-            resp = requests.get(url, headers=self._headers(), timeout=30)
-            if resp.status_code == 200:
-                data = resp.json().get("data", [])
-                return [t["name"] for t in data if t.get("name")]
-            raise Exception(f"REST API error {resp.status_code}: {resp.json().get('message', resp.text)}")
+        sql = (
+            "SELECT TABLE_SCHEMA, TABLE_NAME "
+            "FROM INFORMATION_SCHEMA.TABLES "
+            "WHERE TABLE_TYPE = 'BASE TABLE' "
+            "ORDER BY TABLE_NAME"
+        )
 
-        # All warehouse-like types use the querydata API
+        # ── Strategy 1: Get SQL endpoint from properties → ODBC ──────────
+        try:
+            sql_endpoint = self._get_item_sql_endpoint(workspace_id, item_id, item_type)
+            if sql_endpoint:
+                conn = self.get_sql_connection(sql_endpoint)
+                cursor = conn.cursor()
+                cursor.execute(sql)
+                tables = [row[1] if len(row) > 1 else row[0] for row in cursor.fetchall()]
+                conn.close()
+                if tables:
+                    return tables
+        except Exception:
+            pass  # Fall through to next strategy
+
+        # ── Strategy 2: REST /lakehouses/{id}/tables (non-schema lakehouses) ──
+        if "lakehouse" in item_type_lower:
+            try:
+                url = f"{self.base_url}/workspaces/{workspace_id}/lakehouses/{item_id}/tables"
+                resp = requests.get(url, headers=self._headers(), timeout=30)
+                if resp.status_code == 200:
+                    data = resp.json().get("data", [])
+                    tables = [t["name"] for t in data if t.get("name")]
+                    if tables:
+                        return tables
+            except Exception:
+                pass
+
+        # ── Strategy 3: REST querydata API (warehouse) ────────────────────
         if any(k in item_type_lower for k in ("warehouse", "database", "kql")):
-            sql = (
-                "SELECT TABLE_SCHEMA, TABLE_NAME "
-                "FROM INFORMATION_SCHEMA.TABLES "
-                "WHERE TABLE_TYPE = 'BASE TABLE' "
-                "ORDER BY TABLE_NAME"
-            )
-            _, rows = self._execute_warehouse_query(workspace_id, item_id, sql)
-            if rows:
-                return [r[1] if len(r) > 1 else r[0] for r in rows]
-            return []
+            try:
+                _, rows = self._execute_warehouse_query(workspace_id, item_id, sql)
+                if rows:
+                    return [r[1] if len(r) > 1 else r[0] for r in rows]
+            except Exception:
+                pass
 
-        raise Exception(f"Unsupported item type: {item_type}")
+        return []
 
     # =========================================================
     # FETCH FABRIC ITEMS (Simulated/Real)
