@@ -169,13 +169,33 @@ class FabricConnector:
 
         if resp.status_code in (200, 202):
             body = resp.json()
-            # Synchronous response
-            if "results" in body or "data" in body:
-                results = body.get("results") or body.get("data") or []
-                if results:
-                    first = results[0]
-                    return first.get("fieldNames", []), first.get("rows", [])
+
+            def _parse_body(b):
+                """Try every known Fabric querydata response shape."""
+                # Shape A: {"results": [{"fieldNames": [...], "rows": [...]}]}
+                for key in ("results", "data"):
+                    val = b.get(key)
+                    if isinstance(val, list) and val:
+                        first = val[0]
+                        if isinstance(first, dict):
+                            fields = first.get("fieldNames") or first.get("columns") or []
+                            rows   = first.get("rows") or []
+                            return fields, rows
+                # Shape B: {"columns": [...], "rows": [...]}
+                if "columns" in b and "rows" in b:
+                    cols = [c.get("name", c) if isinstance(c, dict) else c for c in b["columns"]]
+                    return cols, b["rows"]
+                # Shape C: flat list of row dicts [{"TABLE_SCHEMA":...,"TABLE_NAME":...}, ...]
+                if isinstance(b.get("value"), list):
+                    rows = b["value"]
+                    if rows and isinstance(rows[0], dict):
+                        fields = list(rows[0].keys())
+                        return fields, [[r.get(f) for f in fields] for r in rows]
                 return [], []
+
+            # Synchronous response
+            if any(k in body for k in ("results", "data", "columns", "value")):
+                return _parse_body(body)
 
             # Async / long-running operation — poll
             op_url = resp.headers.get("Location") or resp.headers.get("x-ms-operation-id")
@@ -188,11 +208,7 @@ class FabricConnector:
                         pb = poll.json()
                         status = pb.get("status", "").lower()
                         if status == "succeeded":
-                            results = pb.get("results") or pb.get("data") or []
-                            if results:
-                                first = results[0]
-                                return first.get("fieldNames", []), first.get("rows", [])
-                            return [], []
+                            return _parse_body(pb.get("output") or pb)
                         if status in ("failed", "cancelled"):
                             raise Exception(f"Query job {status}: {pb.get('error', {}).get('message', '')}")
             return [], []

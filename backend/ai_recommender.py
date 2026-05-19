@@ -352,40 +352,45 @@ def render_ai_recommend():
             else:
                 with st.spinner("Authenticating and fetching tables..."):
                     tables = []
-                    error_msg = ""
-                    # ── Strategy 1: ODBC with access token ──────────────
+                    errors = []
+                    # ── Strategy 1: REST API — search workspaces, match by name ──
                     try:
-                        conn = _FC(t_id, c_id, c_sec)
-                        tables = conn.list_tables(f_sql, database_name=f_db_val)
+                        conn1 = _FC(t_id, c_id, c_sec)
+                        workspaces = conn1.list_workspaces()
+                        for ws in workspaces:
+                            ws_id = ws.get("id", "")
+                            try:
+                                items = conn1.list_data_items(ws_id)
+                                for item in items:
+                                    dname = item.get("displayName", "")
+                                    if dname.lower() == (f_db_val or "").lower():
+                                        tables = conn1.list_tables_via_api(
+                                            ws_id, item["id"],
+                                            item_type=item.get("type", "Warehouse")
+                                        )
+                                        if tables:
+                                            st.session_state.ai_state["f_workspace_id"] = ws_id
+                                            st.session_state.ai_state["f_item_id"]      = item["id"]
+                                            st.session_state.ai_state["f_item_type"]    = item.get("type", "Warehouse")
+                                            break
+                            except Exception as _ie:
+                                errors.append(f"workspace {ws_id}: {_ie}")
+                            if tables:
+                                break
+                        if not tables:
+                            errors.append(f"REST: no item named '{f_db_val}' found in any accessible workspace")
                     except Exception as e1:
-                        error_msg = str(e1)
-                        # ── Strategy 2: Search workspace + querydata REST API ──
+                        errors.append(f"REST: {e1}")
+
+                    # ── Strategy 2: ODBC with access token (fallback) ────────────
+                    if not tables:
                         try:
                             conn2 = _FC(t_id, c_id, c_sec)
-                            workspaces = conn2.list_workspaces()
-                            for ws in workspaces:
-                                ws_id = ws.get("id", "")
-                                try:
-                                    items = conn2.list_data_items(ws_id)
-                                    for item in items:
-                                        name = item.get("displayName", "")
-                                        if name.lower() == (f_db_val or "").lower():
-                                            tables = conn2.list_tables_via_api(
-                                                ws_id, item["id"],
-                                                item_type=item.get("type", "Warehouse")
-                                            )
-                                            if tables:
-                                                # Save IDs for future use
-                                                st.session_state.ai_state["f_workspace_id"] = ws_id
-                                                st.session_state.ai_state["f_item_id"]      = item["id"]
-                                                st.session_state.ai_state["f_item_type"]    = item.get("type", "Warehouse")
-                                                break
-                                except Exception:
-                                    pass
-                                if tables:
-                                    break
+                            tables = conn2.list_tables(f_sql, database_name=f_db_val)
                         except Exception as e2:
-                            error_msg = f"{error_msg} | REST fallback: {e2}"
+                            errors.append(f"ODBC: {e2}")
+
+                    error_msg = " | ".join(errors)
 
                     if tables:
                         st.session_state.ai_fabric_tables = tables
