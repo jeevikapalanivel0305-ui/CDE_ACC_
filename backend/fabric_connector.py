@@ -75,12 +75,40 @@ class FabricConnector:
         }
 
     # =========================================================
+    # REST API — TABLE LISTING (preferred for Lakehouse)
+    # =========================================================
+    def list_tables_via_api(self, workspace_id: str, item_id: str, item_type: str = "lakehouse"):
+        """List tables from a Fabric Lakehouse using the Fabric REST API.
+        This is more reliable than ODBC for deployments (no driver auth issues).
+        item_type: 'lakehouse' (default) or 'warehouse'
+        """
+        if not self.token:
+            success, msg = self.authenticate()
+            if not success:
+                raise Exception(f"Authentication failed: {msg}")
+
+        workspace_id = workspace_id.strip()
+        item_id = item_id.strip()
+
+        if item_type.lower() == "lakehouse":
+            url = f"{self.base_url}/workspaces/{workspace_id}/lakehouses/{item_id}/tables"
+            resp = requests.get(url, headers=self._headers(), timeout=30)
+            if resp.status_code == 200:
+                data = resp.json().get("data", [])
+                return [t["name"] for t in data if t.get("name")]
+            raise Exception(f"REST API error {resp.status_code}: {resp.json().get('message', resp.text)}")
+
+        # Warehouse — use INFORMATION_SCHEMA via REST SQL (not supported directly).
+        # Fall back to ODBC path by raising so the caller can retry.
+        raise Exception("Warehouse table listing is not available via REST API; use ODBC (SQL endpoint).")
+
+    # =========================================================
     # FETCH FABRIC ITEMS (Simulated/Real)
     # =========================================================
     def fetch_cdes(self, debug=False):
         """
         Fetch 'CDEs' from Fabric.
-        
+
         Since Fabric doesn't have a direct 'CDE' concept like Purview's Data Governance yet,
         we will map Fabric Items (Lakehouses, Warehouses, Datasets) as potential CDEs.
         """
