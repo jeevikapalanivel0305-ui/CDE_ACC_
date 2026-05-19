@@ -105,10 +105,54 @@ class FabricConnector:
     # =========================================================
     # REST API — TABLE LISTING
     # =========================================================
+    def _execute_warehouse_query(self, workspace_id: str, warehouse_id: str, sql: str):
+        """Execute a SQL query against a Fabric Warehouse via the REST query API.
+        Returns list of rows (each row is a list of values) and field names.
+        """
+        import time
+        self._ensure_token()
+
+        # Submit the query
+        url = f"{self.base_url}/workspaces/{workspace_id}/warehouses/{warehouse_id}/querydata"
+        payload = {"query": sql}
+        resp = requests.post(url, headers=self._headers(), json=payload, timeout=60)
+
+        if resp.status_code in (200, 202):
+            body = resp.json()
+            # Synchronous response
+            if "results" in body or "data" in body:
+                results = body.get("results") or body.get("data") or []
+                if results:
+                    first = results[0]
+                    return first.get("fieldNames", []), first.get("rows", [])
+                return [], []
+
+            # Async / long-running operation — poll
+            op_url = resp.headers.get("Location") or resp.headers.get("x-ms-operation-id")
+            if op_url:
+                for _ in range(20):
+                    time.sleep(2)
+                    poll = requests.get(op_url if op_url.startswith("http") else f"{self.base_url}/{op_url}",
+                                        headers=self._headers(), timeout=30)
+                    if poll.status_code == 200:
+                        pb = poll.json()
+                        status = pb.get("status", "").lower()
+                        if status == "succeeded":
+                            results = pb.get("results") or pb.get("data") or []
+                            if results:
+                                first = results[0]
+                                return first.get("fieldNames", []), first.get("rows", [])
+                            return [], []
+                        if status in ("failed", "cancelled"):
+                            raise Exception(f"Query job {status}: {pb.get('error', {}).get('message', '')}")
+            return [], []
+
+        raise Exception(f"Query API error {resp.status_code}: {resp.json().get('message', resp.text)}")
+
     def list_tables_via_api(self, workspace_id: str, item_id: str, item_type: str = "lakehouse"):
         """List tables from a Fabric item using the REST API.
-        Lakehouse: uses the dedicated /tables endpoint.
-        Warehouse: executes INFORMATION_SCHEMA query via the Fabric query endpoint.
+        Lakehouse  → dedicated /tables REST endpoint.
+        Warehouse  → INFORMATION_SCHEMA query via Fabric querydata API.
         """
         self._ensure_token()
         workspace_id = workspace_id.strip()
@@ -123,18 +167,12 @@ class FabricConnector:
             raise Exception(f"REST API error {resp.status_code}: {resp.json().get('message', resp.text)}")
 
         if item_type.lower() == "warehouse":
-            # Execute a lightweight INFORMATION_SCHEMA query via the Fabric execute-query API
-            url = f"{self.base_url}/workspaces/{workspace_id}/warehouses/{item_id}/tables"
-            resp = requests.get(url, headers=self._headers(), timeout=30)
-            if resp.status_code == 200:
-                data = resp.json().get("data", resp.json().get("value", []))
-                if data:
-                    return [t.get("name") or t.get("displayName", "") for t in data if t.get("name") or t.get("displayName")]
-            # If the /tables endpoint is not available, tell the caller
-            raise Exception(
-                f"Fabric REST API does not expose warehouse table listing "
-                f"(status {resp.status_code}). Please enter the table name manually below."
-            )
+            sql = "SELECT TABLE_SCHEMA, TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_TYPE = 'BASE TABLE' ORDER BY TABLE_NAME"
+            _, rows = self._execute_warehouse_query(workspace_id, item_id, sql)
+            if rows:
+                # rows is list of [schema, table_name]
+                return [r[1] if len(r) > 1 else r[0] for r in rows]
+            return []
 
         raise Exception(f"Unsupported item type: {item_type}")
 
