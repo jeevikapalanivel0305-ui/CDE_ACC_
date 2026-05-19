@@ -75,6 +75,76 @@ class FabricConnector:
         }
 
     # =========================================================
+    # DEVICE CODE FLOW (Interactive User Auth)
+    # =========================================================
+    def start_device_code_flow(self, scope="https://api.fabric.microsoft.com/.default"):
+        """Initiate device code flow. Returns dict with 'user_code', 'verification_uri', 'device_code', 'interval'."""
+        url = f"https://login.microsoftonline.com/{self.tenant_id}/oauth2/v2.0/devicecode"
+        payload = {
+            "client_id": self.client_id,
+            "scope": scope,
+        }
+        resp = requests.post(url, data=payload, timeout=30)
+        if resp.status_code == 200:
+            return resp.json()
+        raise Exception(f"Device code request failed: {resp.json().get('error_description', resp.text)}")
+
+    def poll_device_code(self, device_code, interval=5, timeout=300):
+        """Poll for device code completion. Returns access_token or raises on failure."""
+        import time
+        url = f"https://login.microsoftonline.com/{self.tenant_id}/oauth2/v2.0/token"
+        payload = {
+            "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
+            "client_id": self.client_id,
+            "device_code": device_code,
+        }
+        elapsed = 0
+        while elapsed < timeout:
+            time.sleep(interval)
+            elapsed += interval
+            resp = requests.post(url, data=payload, timeout=30)
+            body = resp.json()
+            if resp.status_code == 200:
+                self.token = body.get("access_token")
+                return self.token
+            error = body.get("error", "")
+            if error == "authorization_pending":
+                continue
+            elif error == "slow_down":
+                interval += 2
+                continue
+            else:
+                raise Exception(body.get("error_description", f"Device code auth failed: {error}"))
+        raise Exception("Device code flow timed out. Please try again.")
+
+    def get_sql_token_from_device_code(self, device_code, interval=5, timeout=300):
+        """Poll device code for SQL-scoped token (database.windows.net)."""
+        import time
+        url = f"https://login.microsoftonline.com/{self.tenant_id}/oauth2/v2.0/token"
+        payload = {
+            "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
+            "client_id": self.client_id,
+            "device_code": device_code,
+        }
+        elapsed = 0
+        while elapsed < timeout:
+            time.sleep(interval)
+            elapsed += interval
+            resp = requests.post(url, data=payload, timeout=30)
+            body = resp.json()
+            if resp.status_code == 200:
+                return body.get("access_token")
+            error = body.get("error", "")
+            if error == "authorization_pending":
+                continue
+            elif error == "slow_down":
+                interval += 2
+                continue
+            else:
+                raise Exception(body.get("error_description", f"Device code auth failed: {error}"))
+        raise Exception("Device code flow timed out.")
+
+    # =========================================================
     # REST API — WORKSPACE / ITEM BROWSER
     # =========================================================
     def _ensure_token(self):
@@ -465,8 +535,10 @@ class FabricConnector:
         except Exception as e:
             return None, str(e)
 
-    def get_sql_connection(self, connection_string, database_name=None):
-        """Create a pyodbc connection to Fabric SQL Endpoint using access-token auth."""
+    def get_sql_connection(self, connection_string, database_name=None, sql_access_token=None):
+        """Create a pyodbc connection to Fabric SQL Endpoint using access-token auth.
+        If sql_access_token is provided (e.g. from device code flow), use it directly.
+        """
         import struct
 
         try:
@@ -510,7 +582,17 @@ class FabricConnector:
 
             print(f"[SQL] Connecting to {server_name} db={database_name or 'default'} driver={best_driver}")
 
-            # ── Preferred: access-token auth (avoids MSAL/ADAL dependency) ──────
+            # ── Use pre-supplied token (e.g. from device code flow) ──────────
+            if sql_access_token:
+                token_enc = sql_access_token.encode("utf-16-le")
+                token_struct = struct.pack(f"<I{len(token_enc)}s", len(token_enc), token_enc)
+                attrs_before = {1256: token_struct}
+                print("[SQL] Using provided access token (device code / user auth).")
+                conn = pyodbc.connect(odbc_str, attrs_before=attrs_before, timeout=30)
+                print("[SQL] Connection successful.")
+                return conn
+
+            # ── Preferred: SP access-token auth (avoids MSAL/ADAL dependency) ──────
             if self.tenant_id and self.client_id and self.client_secret:
                 sql_token, err = self._get_sql_access_token()
                 if sql_token:
@@ -542,11 +624,11 @@ class FabricConnector:
             print(f"❌ [SQL] Connection error: {str(e)}")
             raise e
 
-    def list_tables(self, connection_string, database_name=None):
+    def list_tables(self, connection_string, database_name=None, sql_access_token=None):
         """List all user tables in the Fabric SQL Endpoint"""
         conn = None
         try:
-            conn = self.get_sql_connection(connection_string, database_name)
+            conn = self.get_sql_connection(connection_string, database_name, sql_access_token=sql_access_token)
             cursor = conn.cursor()
             # Query for user tables
             cursor.execute("SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_TYPE = 'BASE TABLE'")
@@ -557,11 +639,11 @@ class FabricConnector:
         finally:
             if conn: conn.close()
 
-    def fetch_table_schema(self, connection_string, table_name, database_name=None):
+    def fetch_table_schema(self, connection_string, table_name, database_name=None, sql_access_token=None):
         """Fetch column names and types from a Fabric table"""
         conn = None
         try:
-            conn = self.get_sql_connection(connection_string, database_name)
+            conn = self.get_sql_connection(connection_string, database_name, sql_access_token=sql_access_token)
             cursor = conn.cursor()
             
             # Extract schema and table name if provided as schema.table

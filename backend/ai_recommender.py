@@ -313,131 +313,229 @@ def render_ai_recommend():
         if not all([t_id, c_id, c_sec]):
             st.warning("⚠️ Enter Tenant ID, Client ID, and Client Secret in the Purview tab first.")
 
-        f_sql = st.text_input(
-            "SQL Analytics Endpoint",
-            value=st.session_state.ai_state["f_sql"] or creds.get('fabric_sql_endpoint', ''),
-            type="password",
-            placeholder="xxxx.datawarehouse.fabric.microsoft.com",
-            key="ai_f_sql_input",
-            on_change=sync_ai_f_sql,
+        # Auth mode selection
+        auth_mode = st.radio(
+            "Authentication Method",
+            ["🔑 Service Principal (auto-browse)", "👤 Sign in with Microsoft (device code)"],
+            index=0, horizontal=True, key="ai_fabric_auth_mode"
         )
 
-        # ── Phase 1: Authenticate & discover all items ─────────────────────
-        if st.button("🔐 Authenticate & Browse Fabric", key="ai_auth_btn", type="secondary"):
-            if not all([t_id, c_id, c_sec]):
-                st.error("❌ Credentials missing — enter Tenant ID, Client ID, Client Secret in the Purview tab.")
-            else:
-                with st.spinner("Authenticating and discovering Fabric items..."):
-                    discovered = []   # [{ws_name, ws_id, item_name, item_id, item_type}]
-                    auth_errors = []
-                    try:
-                        conn = _FC(t_id, c_id, c_sec)
-                        workspaces = conn.list_workspaces()
-                        if not workspaces:
-                            auth_errors.append("No workspaces found. Ensure the Service Principal has Workspace Member (or higher) access in Fabric.")
-                        for ws in workspaces:
-                            ws_id   = ws.get("id", "")
-                            ws_name = ws.get("displayName", ws_id)
-                            try:
-                                items = conn.list_data_items(ws_id)
-                                for item in items:
-                                    discovered.append({
-                                        "ws_id":   ws_id,
-                                        "ws_name": ws_name,
-                                        "item_id":   item.get("id", ""),
-                                        "item_name": item.get("displayName", ""),
-                                        "item_type": item.get("type", "Warehouse"),
-                                    })
-                            except Exception as _ie:
-                                auth_errors.append(f"  • {ws_name}: {_ie}")
-                    except Exception as e:
-                        auth_errors.append(str(e))
+        if "Service Principal" in auth_mode:
+            # ── SERVICE PRINCIPAL MODE ─────────────────────────────────────
+            f_sql = st.text_input(
+                "SQL Analytics Endpoint (optional)",
+                value=st.session_state.ai_state["f_sql"] or creds.get('fabric_sql_endpoint', ''),
+                type="password",
+                placeholder="xxxx.datawarehouse.fabric.microsoft.com",
+                key="ai_f_sql_input",
+                on_change=sync_ai_f_sql,
+            )
 
-                    st.session_state.ai_fabric_items_list = discovered
-                    st.session_state.ai_fabric_tables     = []  # reset tables on re-auth
-                    st.session_state.ai_fabric_sel_item   = None
+            if st.button("🔐 Authenticate & Browse Fabric", key="ai_auth_btn", type="secondary"):
+                if not all([t_id, c_id, c_sec]):
+                    st.error("❌ Credentials missing — enter Tenant ID, Client ID, Client Secret in the Purview tab.")
+                else:
+                    with st.spinner("Authenticating and discovering Fabric items..."):
+                        discovered = []
+                        auth_errors = []
+                        try:
+                            conn = _FC(t_id, c_id, c_sec)
+                            workspaces = conn.list_workspaces()
+                            if not workspaces:
+                                auth_errors.append("No workspaces found. Ensure the SP has Workspace Member access.")
+                            for ws in workspaces:
+                                ws_id   = ws.get("id", "")
+                                ws_name = ws.get("displayName", ws_id)
+                                try:
+                                    items = conn.list_data_items(ws_id)
+                                    for item in items:
+                                        discovered.append({
+                                            "ws_id": ws_id, "ws_name": ws_name,
+                                            "item_id": item.get("id", ""),
+                                            "item_name": item.get("displayName", ""),
+                                            "item_type": item.get("type", "Warehouse"),
+                                        })
+                                except Exception as _ie:
+                                    auth_errors.append(f"  • {ws_name}: {_ie}")
+                        except Exception as e:
+                            auth_errors.append(str(e))
 
-                    if discovered:
-                        st.success(f"✅ Found {len(discovered)} item(s) across {len(set(d['ws_id'] for d in discovered))} workspace(s).")
-                    else:
-                        err_detail = "\n".join(auth_errors) if auth_errors else "No items accessible."
-                        st.error(f"❌ Authentication succeeded but no items found.\n\n{err_detail}")
-                    if auth_errors and discovered:
-                        st.warning("Some workspaces had errors:\n" + "\n".join(auth_errors))
+                        st.session_state.ai_fabric_items_list = discovered
+                        st.session_state.ai_fabric_tables = []
+                        st.session_state.ai_fabric_sel_item = None
+
+                        if discovered:
+                            st.success(f"✅ Found {len(discovered)} item(s) across {len(set(d['ws_id'] for d in discovered))} workspace(s).")
+                        else:
+                            st.error(f"❌ No items found.\n\n" + "\n".join(auth_errors))
+                        if auth_errors and discovered:
+                            st.warning("Some errors:\n" + "\n".join(auth_errors))
+                        st.rerun()
+
+            # Item dropdown
+            discovered_items = st.session_state.get('ai_fabric_items_list', [])
+            fabric_table = None
+
+            if discovered_items:
+                item_labels = [f"{d['item_name']}  ({d['item_type']})  — {d['ws_name']}" for d in discovered_items]
+                saved_label = st.session_state.get('ai_fabric_sel_label', item_labels[0])
+                default_idx = item_labels.index(saved_label) if saved_label in item_labels else 0
+                chosen_label = st.selectbox("Select Warehouse / Lakehouse", item_labels, index=default_idx, key="ai_fabric_item_sel")
+                st.session_state.ai_fabric_sel_label = chosen_label
+                chosen = discovered_items[item_labels.index(chosen_label)]
+
+                item_key = f"{chosen['ws_id']}|{chosen['item_id']}"
+                if st.session_state.get('ai_fabric_sel_item') != item_key:
+                    st.session_state.ai_fabric_sel_item = item_key
+                    st.session_state.ai_fabric_tables = []
+                    with st.spinner(f"Loading tables from '{chosen['item_name']}'..."):
+                        try:
+                            tbls = _FC(t_id, c_id, c_sec).list_tables_via_api(
+                                chosen["ws_id"], chosen["item_id"], item_type=chosen["item_type"])
+                            st.session_state.ai_fabric_tables = tbls
+                            st.session_state.ai_state["f_workspace_id"] = chosen["ws_id"]
+                            st.session_state.ai_state["f_item_id"] = chosen["item_id"]
+                            st.session_state.ai_state["f_item_type"] = chosen["item_type"]
+                            if not tbls:
+                                st.warning("No tables found. The SP may need elevated access.")
+                        except Exception as et:
+                            st.error(f"❌ Could not load tables: {et}")
                     st.rerun()
 
-        # ── Phase 2: Pick item from discovered list ─────────────────────────
-        discovered_items = st.session_state.get('ai_fabric_items_list', [])
-        fabric_table = None
-
-        if discovered_items:
-            item_labels = [
-                f"{d['item_name']}  ({d['item_type']})  — {d['ws_name']}"
-                for d in discovered_items
-            ]
-            saved_label = st.session_state.get('ai_fabric_sel_label', item_labels[0])
-            default_idx = item_labels.index(saved_label) if saved_label in item_labels else 0
-
-            chosen_label = st.selectbox(
-                "Select Warehouse / Lakehouse",
-                item_labels,
-                index=default_idx,
-                key="ai_fabric_item_sel",
-            )
-            st.session_state.ai_fabric_sel_label = chosen_label
-            chosen = discovered_items[item_labels.index(chosen_label)]
-
-            # ── Phase 3: Fetch tables for chosen item ───────────────────────
-            item_key = f"{chosen['ws_id']}|{chosen['item_id']}"
-            if st.session_state.get('ai_fabric_sel_item') != item_key:
-                # Auto-load tables when selection changes
-                st.session_state.ai_fabric_sel_item = item_key
-                st.session_state.ai_fabric_tables = []
-                with st.spinner(f"Loading tables from '{chosen['item_name']}'..."):
-                    try:
-                        conn = _FC(t_id, c_id, c_sec)
-                        tbls = conn.list_tables_via_api(
-                            chosen["ws_id"], chosen["item_id"],
-                            item_type=chosen["item_type"]
-                        )
-                        st.session_state.ai_fabric_tables = tbls
-                        st.session_state.ai_state["f_workspace_id"] = chosen["ws_id"]
-                        st.session_state.ai_state["f_item_id"]      = chosen["item_id"]
-                        st.session_state.ai_state["f_item_type"]    = chosen["item_type"]
-                        if not tbls:
-                            st.warning("No tables found in this item. It may be empty or the SP needs elevated access.")
-                    except Exception as et:
-                        st.error(f"❌ Could not load tables: {et}")
-                st.rerun()
-
-            # ── Phase 4: Pick table ─────────────────────────────────────────
-            fabric_tables = st.session_state.get('ai_fabric_tables', [])
-            if fabric_tables:
-                tab_options = ["--- Select Table ---"] + fabric_tables
-                saved_tab = st.session_state.ai_state.get("f_tab_sel", "--- Select Table ---")
-                tab_idx = tab_options.index(saved_tab) if saved_tab in tab_options else 0
-                fabric_table_sel = st.selectbox("Select Table", tab_options, index=tab_idx,
-                                                key="ai_f_tab_sel_ref", on_change=sync_ai_f_tab_sel)
-                fabric_table = fabric_table_sel if fabric_table_sel != "--- Select Table ---" else None
+                fabric_tables = st.session_state.get('ai_fabric_tables', [])
+                if fabric_tables:
+                    tab_options = ["--- Select Table ---"] + fabric_tables
+                    saved_tab = st.session_state.ai_state.get("f_tab_sel", "--- Select Table ---")
+                    tab_idx = tab_options.index(saved_tab) if saved_tab in tab_options else 0
+                    fabric_table_sel = st.selectbox("Select Table", tab_options, index=tab_idx,
+                                                    key="ai_f_tab_sel_ref", on_change=sync_ai_f_tab_sel)
+                    fabric_table = fabric_table_sel if fabric_table_sel != "--- Select Table ---" else None
+                else:
+                    fabric_table = st.text_input("Or enter Table Name manually",
+                                                 placeholder="e.g. Sales_Transactions",
+                                                 value=st.session_state.ai_state["f_tab_text"],
+                                                 key="ai_f_tab_text_ref", on_change=sync_ai_f_tab_text)
             else:
-                st.info("No tables loaded yet. Authenticate above to browse Fabric items.")
-                fabric_table = st.text_input("Or enter Table Name manually",
+                fabric_table = st.text_input("Table Name (manual)",
+                                             placeholder="Authenticate above, or type table name",
+                                             value=st.session_state.ai_state["f_tab_text"],
+                                             key="ai_f_tab_text_ref", on_change=sync_ai_f_tab_text)
+
+        else:
+            # ── DEVICE CODE FLOW (Interactive User Auth) ───────────────────
+            st.info("Sign in with your Microsoft account to access Fabric warehouses your personal account has access to.")
+
+            col_ep, col_db = st.columns([3, 1])
+            with col_ep:
+                f_sql = st.text_input(
+                    "SQL Analytics Endpoint *",
+                    value=st.session_state.ai_state["f_sql"] or creds.get('fabric_sql_endpoint', ''),
+                    placeholder="xxxx.datawarehouse.fabric.microsoft.com",
+                    key="ai_f_sql_input",
+                    on_change=sync_ai_f_sql,
+                )
+            with col_db:
+                f_db = st.text_input(
+                    "Database Name",
+                    value=st.session_state.ai_state.get("f_db", ""),
+                    placeholder="e.g. w1",
+                    key="ai_f_db_input",
+                    on_change=sync_ai_f_db,
+                )
+
+            # Step 1: Start device code flow
+            if st.button("🔐 Sign In (get code)", key="ai_device_code_btn", type="secondary"):
+                if not t_id or not c_id:
+                    st.error("❌ Tenant ID and Client ID are required.")
+                else:
+                    try:
+                        connector = _FC(t_id, c_id, c_sec or "dummy")
+                        flow = connector.start_device_code_flow(scope="https://database.windows.net/user_impersonation offline_access")
+                        st.session_state.ai_device_code_flow = flow
+                        st.session_state.ai_device_code_authenticated = False
+                        st.session_state.ai_device_code_token = None
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"❌ {e}")
+
+            # Step 2: Show code and poll
+            flow = st.session_state.get('ai_device_code_flow')
+            fabric_table = None
+
+            if flow and not st.session_state.get('ai_device_code_authenticated'):
+                user_code = flow.get("user_code", "")
+                verify_url = flow.get("verification_uri", "https://microsoft.com/devicelogin")
+                st.markdown(f"""
+                ### 📋 Sign in to Microsoft
+                1. Go to **[{verify_url}]({verify_url})**
+                2. Enter code: **`{user_code}`**
+                3. Sign in with your email and password
+                4. Click **"Verify & Fetch Tables"** below after signing in
+                """)
+
+                if st.button("✅ Verify & Fetch Tables", key="ai_verify_device_btn", type="primary"):
+                    f_sql_val = st.session_state.ai_state.get("f_sql", "").strip()
+                    f_db_val = st.session_state.ai_state.get("f_db", "").strip() or None
+                    if not f_sql_val:
+                        st.error("❌ Enter the SQL Analytics Endpoint above.")
+                    else:
+                        with st.spinner("Verifying sign-in and fetching tables..."):
+                            try:
+                                connector = _FC(t_id, c_id, c_sec or "dummy")
+                                token = connector.poll_device_code(
+                                    flow["device_code"],
+                                    interval=flow.get("interval", 5),
+                                    timeout=10  # short poll — user should have signed in already
+                                )
+                                st.session_state.ai_device_code_token = token
+                                st.session_state.ai_device_code_authenticated = True
+
+                                # Now use token to list tables
+                                tables = connector.list_tables(f_sql_val, database_name=f_db_val, sql_access_token=token)
+                                st.session_state.ai_fabric_tables = tables
+                                if tables:
+                                    st.success(f"✅ Signed in! Found {len(tables)} table(s).")
+                                else:
+                                    st.warning("Signed in but no tables found.")
+                                st.session_state.ai_device_code_flow = None
+                                st.rerun()
+                            except Exception as e:
+                                err_msg = str(e)
+                                if "authorization_pending" in err_msg:
+                                    st.warning("⏳ Still waiting for sign-in. Complete the steps above, then click Verify again.")
+                                else:
+                                    st.error(f"❌ {err_msg}")
+
+            elif st.session_state.get('ai_device_code_authenticated'):
+                st.success("✅ Signed in with Microsoft account.")
+                fabric_tables = st.session_state.get('ai_fabric_tables', [])
+                if fabric_tables:
+                    tab_options = ["--- Select Table ---"] + fabric_tables
+                    saved_tab = st.session_state.ai_state.get("f_tab_sel", "--- Select Table ---")
+                    tab_idx = tab_options.index(saved_tab) if saved_tab in tab_options else 0
+                    fabric_table_sel = st.selectbox("Select Table", tab_options, index=tab_idx,
+                                                    key="ai_f_tab_sel_ref", on_change=sync_ai_f_tab_sel)
+                    fabric_table = fabric_table_sel if fabric_table_sel != "--- Select Table ---" else None
+                else:
+                    fabric_table = st.text_input("Table Name",
+                                                 placeholder="e.g. Sales_Transactions",
+                                                 value=st.session_state.ai_state["f_tab_text"],
+                                                 key="ai_f_tab_text_ref", on_change=sync_ai_f_tab_text)
+            else:
+                fabric_table = st.text_input("Table Name (sign in first to auto-discover)",
                                              placeholder="e.g. Sales_Transactions",
                                              value=st.session_state.ai_state["f_tab_text"],
                                              key="ai_f_tab_text_ref", on_change=sync_ai_f_tab_text)
-        else:
-            # Not yet authenticated — show manual fallback
-            fabric_table = st.text_input("Table Name (manual)",
-                                         placeholder="Authenticate above, or type table name",
-                                         value=st.session_state.ai_state["f_tab_text"],
-                                         key="ai_f_tab_text_ref", on_change=sync_ai_f_tab_text)
 
         # Column discovery via ODBC (best-effort; AI infers if unavailable)
         f_db_val = st.session_state.ai_state.get("f_db") or None
+        f_sql_val = st.session_state.ai_state.get("f_sql", "")
+        user_token = st.session_state.get('ai_device_code_token')
         if fabric_table and st.session_state.get('prev_ai_f_tab') != fabric_table:
             with st.spinner(f"Discovering columns for '{fabric_table}'..."):
                 try:
-                    schema = _FC(t_id, c_id, c_sec).fetch_table_schema(f_sql, fabric_table, database_name=f_db_val)
+                    schema = _FC(t_id, c_id, c_sec or "dummy").fetch_table_schema(
+                        f_sql_val, fabric_table, database_name=f_db_val, sql_access_token=user_token)
                     st.session_state.ai_discovered_cols = [c['name'] for c in schema] if schema else []
                 except Exception:
                     st.session_state.ai_discovered_cols = []
