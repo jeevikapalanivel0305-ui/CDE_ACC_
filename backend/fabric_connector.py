@@ -75,18 +75,42 @@ class FabricConnector:
         }
 
     # =========================================================
-    # REST API — TABLE LISTING (preferred for Lakehouse)
+    # REST API — WORKSPACE / ITEM BROWSER
     # =========================================================
-    def list_tables_via_api(self, workspace_id: str, item_id: str, item_type: str = "lakehouse"):
-        """List tables from a Fabric Lakehouse using the Fabric REST API.
-        This is more reliable than ODBC for deployments (no driver auth issues).
-        item_type: 'lakehouse' (default) or 'warehouse'
-        """
+    def _ensure_token(self):
         if not self.token:
-            success, msg = self.authenticate()
-            if not success:
+            ok, msg = self.authenticate()
+            if not ok:
                 raise Exception(f"Authentication failed: {msg}")
 
+    def list_workspaces(self):
+        """Return list of dicts with 'id' and 'displayName' for all accessible workspaces."""
+        self._ensure_token()
+        resp = requests.get(f"{self.base_url}/workspaces", headers=self._headers(), timeout=30)
+        if resp.status_code == 200:
+            return resp.json().get("value", [])
+        raise Exception(f"Could not list workspaces ({resp.status_code}): {resp.json().get('message', resp.text)}")
+
+    def list_items(self, workspace_id: str, item_type: str):
+        """Return list of dicts with 'id' and 'displayName' for Lakehouses or Warehouses in a workspace.
+        item_type: 'Lakehouse' or 'Warehouse'
+        """
+        self._ensure_token()
+        url = f"{self.base_url}/workspaces/{workspace_id}/items?type={item_type}"
+        resp = requests.get(url, headers=self._headers(), timeout=30)
+        if resp.status_code == 200:
+            return resp.json().get("value", [])
+        raise Exception(f"Could not list {item_type}s ({resp.status_code}): {resp.json().get('message', resp.text)}")
+
+    # =========================================================
+    # REST API — TABLE LISTING
+    # =========================================================
+    def list_tables_via_api(self, workspace_id: str, item_id: str, item_type: str = "lakehouse"):
+        """List tables from a Fabric item using the REST API.
+        Lakehouse: uses the dedicated /tables endpoint.
+        Warehouse: executes INFORMATION_SCHEMA query via the Fabric query endpoint.
+        """
+        self._ensure_token()
         workspace_id = workspace_id.strip()
         item_id = item_id.strip()
 
@@ -98,9 +122,21 @@ class FabricConnector:
                 return [t["name"] for t in data if t.get("name")]
             raise Exception(f"REST API error {resp.status_code}: {resp.json().get('message', resp.text)}")
 
-        # Warehouse — use INFORMATION_SCHEMA via REST SQL (not supported directly).
-        # Fall back to ODBC path by raising so the caller can retry.
-        raise Exception("Warehouse table listing is not available via REST API; use ODBC (SQL endpoint).")
+        if item_type.lower() == "warehouse":
+            # Execute a lightweight INFORMATION_SCHEMA query via the Fabric execute-query API
+            url = f"{self.base_url}/workspaces/{workspace_id}/warehouses/{item_id}/tables"
+            resp = requests.get(url, headers=self._headers(), timeout=30)
+            if resp.status_code == 200:
+                data = resp.json().get("data", resp.json().get("value", []))
+                if data:
+                    return [t.get("name") or t.get("displayName", "") for t in data if t.get("name") or t.get("displayName")]
+            # If the /tables endpoint is not available, tell the caller
+            raise Exception(
+                f"Fabric REST API does not expose warehouse table listing "
+                f"(status {resp.status_code}). Please enter the table name manually below."
+            )
+
+        raise Exception(f"Unsupported item type: {item_type}")
 
     # =========================================================
     # FETCH FABRIC ITEMS (Simulated/Real)
