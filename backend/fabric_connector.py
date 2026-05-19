@@ -91,21 +91,56 @@ class FabricConnector:
             return resp.json().get("value", [])
         raise Exception(f"Could not list workspaces ({resp.status_code}): {resp.json().get('message', resp.text)}")
 
+    # Fabric uses these type names for SQL-queryable data stores
+    _DATA_ITEM_TYPES = (
+        "Warehouse", "Lakehouse", "DataWarehouse",
+        "MirroredWarehouse", "SQLDatabase", "KQLDatabase",
+    )
+
     def list_data_items(self, workspace_id: str):
-        """Return all Warehouses and Lakehouses in a workspace as a combined list.
-        Each entry has 'id', 'displayName', and 'type' ('Warehouse' or 'Lakehouse').
+        """Return all data items (Warehouses, Lakehouses, etc.) in a workspace.
+        Fetches every known SQL-queryable item type so nothing is missed.
+        Also falls back to listing ALL items if none of the typed queries return results.
+        Each entry has 'id', 'displayName', and 'type'.
         """
         self._ensure_token()
+        seen_ids = set()
         items = []
-        for item_type in ("Warehouse", "Lakehouse"):
+
+        # Try each known data-item type
+        for item_type in self._DATA_ITEM_TYPES:
             url = f"{self.base_url}/workspaces/{workspace_id}/items?type={item_type}"
-            resp = requests.get(url, headers=self._headers(), timeout=30)
-            if resp.status_code == 200:
-                for i in resp.json().get("value", []):
-                    i["type"] = item_type   # ensure type is set
-                    items.append(i)
+            try:
+                resp = requests.get(url, headers=self._headers(), timeout=30)
+                if resp.status_code == 200:
+                    for i in resp.json().get("value", []):
+                        if i.get("id") not in seen_ids:
+                            i.setdefault("type", item_type)
+                            items.append(i)
+                            seen_ids.add(i["id"])
+            except Exception:
+                pass
+
+        # Fallback: list ALL items in the workspace and keep data-related ones
         if not items:
-            raise Exception("No Warehouses or Lakehouses found in this workspace. Check that the Service Principal has Workspace Member access.")
+            url = f"{self.base_url}/workspaces/{workspace_id}/items"
+            try:
+                resp = requests.get(url, headers=self._headers(), timeout=30)
+                if resp.status_code == 200:
+                    for i in resp.json().get("value", []):
+                        t = i.get("type", "")
+                        if any(k in t for k in ("Warehouse", "Lakehouse", "Database", "KQL")):
+                            if i.get("id") not in seen_ids:
+                                items.append(i)
+                                seen_ids.add(i["id"])
+            except Exception:
+                pass
+
+        if not items:
+            raise Exception(
+                "No data items found in this workspace. "
+                "Check that the Service Principal has Workspace Member (or higher) access to the workspace."
+            )
         return items
 
     def list_items(self, workspace_id: str, item_type: str):
@@ -173,7 +208,9 @@ class FabricConnector:
         workspace_id = workspace_id.strip()
         item_id = item_id.strip()
 
-        if item_type.lower() == "lakehouse":
+        item_type_lower = item_type.lower()
+
+        if item_type_lower == "lakehouse":
             url = f"{self.base_url}/workspaces/{workspace_id}/lakehouses/{item_id}/tables"
             resp = requests.get(url, headers=self._headers(), timeout=30)
             if resp.status_code == 200:
@@ -181,11 +218,16 @@ class FabricConnector:
                 return [t["name"] for t in data if t.get("name")]
             raise Exception(f"REST API error {resp.status_code}: {resp.json().get('message', resp.text)}")
 
-        if item_type.lower() == "warehouse":
-            sql = "SELECT TABLE_SCHEMA, TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_TYPE = 'BASE TABLE' ORDER BY TABLE_NAME"
+        # All warehouse-like types use the querydata API
+        if any(k in item_type_lower for k in ("warehouse", "database", "kql")):
+            sql = (
+                "SELECT TABLE_SCHEMA, TABLE_NAME "
+                "FROM INFORMATION_SCHEMA.TABLES "
+                "WHERE TABLE_TYPE = 'BASE TABLE' "
+                "ORDER BY TABLE_NAME"
+            )
             _, rows = self._execute_warehouse_query(workspace_id, item_id, sql)
             if rows:
-                # rows is list of [schema, table_name]
                 return [r[1] if len(r) > 1 else r[0] for r in rows]
             return []
 
