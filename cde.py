@@ -977,12 +977,13 @@ def render_cde_add():
     
     # Callback to sync form data
     def sync_add_form():
-        st.session_state.onboard_form_data['add_name'] = st.session_state.aname
-        st.session_state.onboard_form_data['add_domain'] = st.session_state.adom
-        st.session_state.onboard_form_data['add_source'] = st.session_state.asrc
-        st.session_state.onboard_form_data['add_steward'] = st.session_state.aste
-        st.session_state.onboard_form_data['add_owner'] = st.session_state.aown
-        st.session_state.onboard_form_data['add_def'] = st.session_state.adef
+        fd = st.session_state.onboard_form_data
+        fd['add_name']   = st.session_state.get('aname', fd.get('add_name', ''))
+        fd['add_domain'] = st.session_state.get('adom',  fd.get('add_domain', ''))
+        fd['add_source'] = st.session_state.get('asrc',  fd.get('add_source', ''))
+        fd['add_steward']= st.session_state.get('aste',  fd.get('add_steward', ''))
+        fd['add_owner']  = st.session_state.get('aown',  fd.get('add_owner', ''))
+        fd['add_def']    = st.session_state.get('adef',  fd.get('add_def', ''))
 
     with st.container(border=True):
         col1, col2 = st.columns(2)
