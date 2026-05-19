@@ -225,54 +225,94 @@ class FabricConnector:
     # =========================================================
     # SQL ENDPOINT INTEGRATION (Hybrid Mode)
     # =========================================================
-    def get_sql_connection(self, connection_string, database_name=None):
-        """Create a pyodbc connection to Fabric SQL Endpoint with optional Database selection"""
+    def _get_sql_access_token(self):
+        """Get an access token scoped for Azure SQL / Fabric SQL endpoints."""
         try:
-            # Clean the string
+            url = f"https://login.microsoftonline.com/{self.tenant_id}/oauth2/v2.0/token"
+            payload = {
+                "grant_type": "client_credentials",
+                "client_id": self.client_id,
+                "client_secret": self.client_secret,
+                "scope": "https://database.windows.net/.default",
+            }
+            resp = requests.post(url, data=payload, timeout=30)
+            if resp.status_code == 200:
+                return resp.json().get("access_token"), None
+            return None, resp.json().get("error_description", resp.text)
+        except Exception as e:
+            return None, str(e)
+
+    def get_sql_connection(self, connection_string, database_name=None):
+        """Create a pyodbc connection to Fabric SQL Endpoint using access-token auth."""
+        import struct
+
+        try:
+            # Clean the endpoint string
             raw_endpoint = str(connection_string).strip()
-            if raw_endpoint.startswith("https://"): raw_endpoint = raw_endpoint.replace("https://", "")
-            if raw_endpoint.startswith("tcp:"): raw_endpoint = raw_endpoint.replace("tcp:", "")
-            
-            # 0. Validate if it's an API URL instead of a SQL Endpoint
+            for prefix in ("https://", "tcp:"):
+                if raw_endpoint.startswith(prefix):
+                    raw_endpoint = raw_endpoint[len(prefix):]
+
             if "api.fabric.microsoft.com" in raw_endpoint.lower():
-                raise Exception("The URL provided looks like a Fabric API URL. Please use the 'SQL Connection String' (e.g. xxxxxxx.datawarehouse.fabric.microsoft.com)")
+                raise Exception(
+                    "The URL looks like a Fabric REST API URL. "
+                    "Please use the SQL Analytics Endpoint "
+                    "(e.g. xxxxxxxx-xxxx.datawarehouse.fabric.microsoft.com)."
+                )
 
-            # 1. Find the best driver
+            # Find the best available ODBC driver
             drivers = pyodbc.drivers()
-            best_driver = next((d for d in ["ODBC Driver 18 for SQL Server", "ODBC Driver 17 for SQL Server"] if d in drivers), "SQL Server")
-            
-            # 2. Build connection string manually to be robust
+            best_driver = next(
+                (d for d in ["ODBC Driver 18 for SQL Server", "ODBC Driver 17 for SQL Server"] if d in drivers),
+                None,
+            )
+            if not best_driver:
+                raise Exception(
+                    "No compatible ODBC driver found. "
+                    "Install 'ODBC Driver 18 for SQL Server' on the host."
+                )
+
             server_name = raw_endpoint.split(";")[0]
-            if "," not in server_name: server_name += ",1433" # Default port
-            
-            connection_string = f"DRIVER={{{best_driver}}};SERVER={server_name};Network=dbmssocn"
-            
-            # Inject Database if provided
+            if "," not in server_name:
+                server_name += ",1433"
+
+            odbc_str = (
+                f"DRIVER={{{best_driver}}};"
+                f"SERVER={server_name};"
+                "Encrypt=yes;"
+                "TrustServerCertificate=no;"
+            )
             if database_name:
-                connection_string += f";DATABASE={database_name}"
-            
-            # Apply existing attributes from user string if any
-            if ";" in raw_endpoint:
-                for attr in raw_endpoint.split(";")[1:]:
-                    if attr and "=" in attr: connection_string += f";{attr}"
+                odbc_str += f"DATABASE={database_name};"
 
-            # 3. Handle Authentication (Inject Service Principal if available)
-            if "AUTHENTICATION=" not in connection_string.upper():
-                if self.client_id and self.client_secret:
-                    # Use Service Principal
-                    connection_string += f";UID={self.client_id};PWD={self.client_secret};Authentication=ActiveDirectoryServicePrincipal"
+            print(f"[SQL] Connecting to {server_name} db={database_name or 'default'} driver={best_driver}")
+
+            # ── Preferred: access-token auth (avoids MSAL/ADAL dependency) ──────
+            if self.tenant_id and self.client_id and self.client_secret:
+                sql_token, err = self._get_sql_access_token()
+                if sql_token:
+                    token_enc = sql_token.encode("utf-16-le")
+                    token_struct = struct.pack(f"<I{len(token_enc)}s", len(token_enc), token_enc)
+                    attrs_before = {1256: token_struct}  # SQL_COPT_SS_ACCESS_TOKEN
+                    print("[SQL] Using access-token authentication.")
+                    conn = pyodbc.connect(odbc_str, attrs_before=attrs_before, timeout=30)
+                    print("[SQL] Connection successful.")
+                    return conn
                 else:
-                    # Fallback to Interactive login
-                    connection_string += ";Authentication=ActiveDirectoryInteractive"
-            
-            # 4. SSL/Security settings for Driver 18+
-            if "TrustServerCertificate" not in connection_string and "Driver 18" in connection_string:
-                connection_string += ";TrustServerCertificate=yes"
+                    print(f"[SQL] Access-token fetch failed ({err}). Falling back to credential auth.")
+                    # Fallback: embed credentials directly
+                    odbc_str += f"UID={self.client_id};PWD={self.client_secret};Authentication=ActiveDirectoryServicePrincipal;"
+            elif self.client_id and self.client_secret:
+                # No tenant ID — try credential auth anyway
+                odbc_str += f"UID={self.client_id};PWD={self.client_secret};Authentication=ActiveDirectoryServicePrincipal;"
+            else:
+                raise Exception(
+                    "No credentials configured. "
+                    "Please enter Tenant ID, Client ID, and Client Secret in the Fabric Connector settings."
+                )
 
-            print(f"� [SQL] Connecting with string: {connection_string.split('PWD=')[0]}... [pwd masked]")
-            
-            # 5. Connect (timeout shortened for faster feedback)
-            conn = pyodbc.connect(connection_string, timeout=15)
+            # 5. Connect
+            conn = pyodbc.connect(odbc_str, timeout=30)
             print("🔗 [SQL] Connection successful.")
             return conn
         except Exception as e:
