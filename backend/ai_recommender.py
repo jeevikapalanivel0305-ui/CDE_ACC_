@@ -317,7 +317,7 @@ def render_ai_recommend():
         auth_mode = st.radio(
             "Authentication Method",
             ["🔑 Service Principal (auto-browse)", "👤 Sign in with Microsoft (device code)"],
-            index=0, horizontal=True, key="ai_fabric_auth_mode"
+            index=1, horizontal=True, key="ai_fabric_auth_mode"
         )
 
         if "Service Principal" in auth_mode:
@@ -427,17 +427,19 @@ def render_ai_recommend():
 
             col_ep, col_db = st.columns([3, 1])
             with col_ep:
+                _default_ep = st.session_state.ai_state["f_sql"] or creds.get('fabric_sql_endpoint', '') or "ohk6lkhiim6ezfv6gravnt3iq4-qjn3af3jrkje7ellmgoj635c7q.datawarehouse.fabric.microsoft.com"
                 f_sql = st.text_input(
                     "SQL Analytics Endpoint *",
-                    value=st.session_state.ai_state["f_sql"] or creds.get('fabric_sql_endpoint', ''),
+                    value=_default_ep,
                     placeholder="xxxx.datawarehouse.fabric.microsoft.com",
                     key="ai_f_sql_input",
                     on_change=sync_ai_f_sql,
                 )
             with col_db:
+                _default_db = st.session_state.ai_state.get("f_db", "") or "w1"
                 f_db = st.text_input(
                     "Database Name",
-                    value=st.session_state.ai_state.get("f_db", ""),
+                    value=_default_db,
                     placeholder="e.g. w1",
                     key="ai_f_db_input",
                     on_change=sync_ai_f_db,
