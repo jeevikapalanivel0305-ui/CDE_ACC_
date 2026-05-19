@@ -178,6 +178,15 @@ class AIRecommender:
     def recommend_cdes_from_columns(self, table_name, columns, industry="General"):
         return recommend_cdes_from_columns(table_name, columns, industry)
 
+def _resolve_fabric_creds(creds: dict) -> tuple:
+    """Return (tenant_id, client_id, client_secret) for Fabric.
+    Falls back to Purview credentials when Fabric-specific ones are not set,
+    since both typically share the same Azure AD Service Principal."""
+    tenant_id     = creds.get('fabric_tenant_id')     or creds.get('purview_tenant_id', '')
+    client_id     = creds.get('fabric_client_id')     or creds.get('purview_client_id', '')
+    client_secret = creds.get('fabric_client_secret') or creds.get('purview_client_secret', '')
+    return tenant_id, client_id, client_secret
+
 def render_ai_recommend():
     """Render AI CDE Recommendation Tab"""
     # Clean UI styling - no negative margins to avoid overlaps
@@ -313,7 +322,8 @@ def render_ai_recommend():
                 try:
                     from backend.fabric_connector import FabricConnector
                     creds = st.session_state.connector_creds
-                    connector = FabricConnector(creds.get('fabric_tenant_id', ''), creds.get('fabric_client_id', ''), creds.get('fabric_client_secret', ''))
+                    t_id, c_id, c_sec = _resolve_fabric_creds(creds)
+                    connector = FabricConnector(t_id, c_id, c_sec)
                     tables = connector.list_tables(f_sql, database_name=f_db_val)
                     st.session_state.ai_fabric_tables = tables
                     if tables:
@@ -341,7 +351,8 @@ def render_ai_recommend():
                 try:
                     from backend.fabric_connector import FabricConnector
                     creds = st.session_state.connector_creds
-                    connector = FabricConnector(creds.get('fabric_tenant_id', ''), creds.get('fabric_client_id', ''), creds.get('fabric_client_secret', ''))
+                    t_id, c_id, c_sec = _resolve_fabric_creds(creds)
+                    connector = FabricConnector(t_id, c_id, c_sec)
                     schema = connector.fetch_table_schema(f_sql, fabric_table, database_name=f_db_val)
                     if schema:
                         st.session_state.ai_discovered_cols = [c['name'] for c in schema]
@@ -382,11 +393,8 @@ def render_ai_recommend():
                     try:
                         from backend.fabric_connector import FabricConnector
                         creds = st.session_state.connector_creds
-                        connector = FabricConnector(
-                            creds.get('fabric_tenant_id', ''),
-                            creds.get('fabric_client_id', ''),
-                            creds.get('fabric_client_secret', '')
-                        )
+                        t_id, c_id, c_sec = _resolve_fabric_creds(creds)
+                        connector = FabricConnector(t_id, c_id, c_sec)
                         schema = connector.fetch_table_schema(f_sql, fabric_table, database_name=f_db_val)
                         if schema:
                             cols_to_analyze = [c['name'] for c in schema]
