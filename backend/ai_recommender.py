@@ -423,7 +423,7 @@ def render_ai_recommend():
 
         else:
             # ── DEVICE CODE FLOW (Interactive User Auth) ───────────────────
-            st.info("Sign in with your Microsoft account to access Fabric warehouses your personal account has access to.")
+            st.info("🔐 **Azure Authentication:** Click 'Sign In' below, then open https://microsoft.com/devicelogin in your browser and enter the code to authenticate.")
 
             col_ep, col_db = st.columns([3, 1])
             with col_ep:
@@ -465,12 +465,11 @@ def render_ai_recommend():
                 user_code = flow.get("user_code", "")
                 verify_url = flow.get("verification_uri", "https://microsoft.com/devicelogin")
                 st.markdown(f"""
-                ### 📋 Sign in to Microsoft
-                1. Go to **[{verify_url}]({verify_url})**
-                2. Enter code: **`{user_code}`**
-                3. Sign in with your email and password
-                4. Click **"Verify & Fetch Tables"** below after signing in
+                ### � Azure Authentication
+                To sign in, use a web browser to open **[https://microsoft.com/devicelogin](https://microsoft.com/devicelogin)** and enter the code below to authenticate.
                 """)
+                st.code(user_code, language=None)
+                st.markdown("After signing in, click **Verify & Fetch Tables** below.")
 
                 if st.button("✅ Verify & Fetch Tables", key="ai_verify_device_btn", type="primary"):
                     f_sql_val = st.session_state.ai_state.get("f_sql", "").strip()
