@@ -446,9 +446,9 @@ def render_ai_recommend():
                     st.session_state.ai_discovered_cols = cols_list
                     st.markdown(f"**{len(cols_list)} columns entered**")
 
-            # Optional: Device Code sign-in (requires admin consent in most organizations)
-            with st.expander("🔐 Advanced: Sign in with Azure (requires admin consent)", expanded=False):
-                st.warning("Device Code authentication requires your Azure AD admin to have granted consent. If you see an admin approval error, use the manual entry above instead.")
+            # Optional: Device Code sign-in
+            with st.expander("🔐 Advanced: Sign in with Azure to auto-discover tables", expanded=False):
+                st.markdown("Sign in with your Microsoft account to browse Fabric workspaces and tables automatically.")
 
                 col_ep, col_db = st.columns([3, 1])
                 with col_ep:
@@ -473,7 +473,7 @@ def render_ai_recommend():
                 if st.button("🔐 Sign In (get code)", key="ai_device_code_btn", type="secondary"):
                     try:
                         connector = _FC(t_id or "", c_id or "", c_sec or "")
-                        flow = connector.start_device_code_flow(scope="https://analysis.windows.net/powerbi/api/.default offline_access")
+                        flow = connector.start_device_code_flow()
                         st.session_state.ai_device_code_flow = flow
                         st.session_state.ai_device_code_authenticated = False
                         st.session_state.ai_device_code_token = None

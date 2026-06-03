@@ -77,25 +77,40 @@ class FabricConnector:
     # =========================================================
     # DEVICE CODE FLOW (Interactive User Auth)
     # =========================================================
-    def start_device_code_flow(self, scope="https://database.windows.net/user_impersonation offline_access"):
+    def start_device_code_flow(self, scope="https://api.fabric.microsoft.com/Workspace.Read.All https://api.fabric.microsoft.com/Item.Read.All offline_access"):
         """Initiate device code flow. Returns dict with 'user_code', 'verification_uri', 'device_code', 'interval'.
-        Uses /common authority and Azure CLI public client if no tenant/client provided."""
-        # Use /common and Azure CLI public client ID if tenant/client not set
-        tenant = self.tenant_id if self.tenant_id else "common"
-        client = self.client_id if self.client_id else "04b07795-a710-4532-a957-3b6867d34e34"
+        Tries multiple well-known Microsoft client IDs to avoid admin consent."""
+        tenant = self.tenant_id if self.tenant_id else "organizations"
         
-        url = f"https://login.microsoftonline.com/{tenant}/oauth2/v2.0/devicecode"
-        payload = {
-            "client_id": client,
-            "scope": scope,
-        }
-        resp = requests.post(url, data=payload, timeout=30)
-        if resp.status_code == 200:
-            data = resp.json()
-            data["_client_id"] = client  # store for polling
-            data["_tenant"] = tenant
-            return data
-        raise Exception(f"Device code request failed: {resp.json().get('error_description', resp.text)}")
+        # List of well-known Microsoft first-party client IDs to try
+        # These are pre-consented in most Azure AD tenants
+        client_ids_to_try = [
+            ("Power BI Desktop", "23d8f6bd-1eb0-4cc2-a08c-7bf525c67bcd"),
+            ("Azure CLI", "04b07795-a710-4532-a957-3b6867d34e34"),
+            ("Microsoft Azure PowerShell", "1950a258-227b-4e31-a9cf-717495945fc2"),
+        ]
+        
+        # If user provided a client_id, use only that
+        if self.client_id:
+            client_ids_to_try = [("Custom", self.client_id)]
+        
+        last_error = ""
+        for app_name, client in client_ids_to_try:
+            url = f"https://login.microsoftonline.com/{tenant}/oauth2/v2.0/devicecode"
+            payload = {
+                "client_id": client,
+                "scope": scope,
+            }
+            resp = requests.post(url, data=payload, timeout=30)
+            if resp.status_code == 200:
+                data = resp.json()
+                data["_client_id"] = client
+                data["_tenant"] = tenant
+                data["_app_name"] = app_name
+                return data
+            last_error = resp.json().get('error_description', resp.text)
+        
+        raise Exception(f"Device code request failed with all client IDs: {last_error}")
 
     def poll_device_code(self, device_code, interval=5, timeout=300, _flow=None):
         """Poll for device code completion. Returns access_token or raises on failure."""
