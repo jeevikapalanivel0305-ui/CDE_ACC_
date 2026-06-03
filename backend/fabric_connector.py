@@ -382,6 +382,41 @@ class FabricConnector:
     # =========================================================
     # FETCH FABRIC ITEMS (Simulated/Real)
     # =========================================================
+    def fetch_table_schema_via_api(self, workspace_id: str, item_id: str, table_name: str, item_type: str = "Lakehouse"):
+        """Fetch column schema for a specific table using Fabric REST API (no SQL port needed).
+        Returns list of {'name': col_name, 'type': col_type} or empty list.
+        """
+        if not self.token:
+            raise Exception("Not authenticated.")
+
+        # Strategy 1: Lakehouse tables API (returns columns for each table)
+        if "lakehouse" in item_type.lower():
+            try:
+                url = f"{self.base_url}/workspaces/{workspace_id}/lakehouses/{item_id}/tables"
+                resp = requests.get(url, headers=self._headers(), timeout=30)
+                if resp.status_code == 200:
+                    for table in resp.json().get("data", []):
+                        if table.get("name", "").lower() == table_name.lower():
+                            cols = table.get("columns", [])
+                            if cols:
+                                return [{"name": c.get("name", ""), "type": c.get("type", "Unknown")} for c in cols]
+            except Exception:
+                pass
+
+        # Strategy 2: Use warehouse query API with INFORMATION_SCHEMA
+        try:
+            sql = f"SELECT COLUMN_NAME, DATA_TYPE FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = '{table_name}'"
+            _, rows = self._execute_warehouse_query(workspace_id, item_id, sql)
+            if rows:
+                return [{"name": r[0], "type": r[1] if len(r) > 1 else "Unknown"} for r in rows]
+        except Exception:
+            pass
+
+        return []
+
+    # =========================================================
+    # FETCH FABRIC ITEMS (Simulated/Real)
+    # =========================================================
     def fetch_cdes(self, debug=False):
         """
         Fetch 'CDEs' from Fabric.
