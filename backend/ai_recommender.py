@@ -422,172 +422,183 @@ def render_ai_recommend():
                                              key="ai_f_tab_text_ref", on_change=sync_ai_f_tab_text)
 
         else:
-            # ── DEVICE CODE FLOW (Interactive User Auth) ───────────────────
-            st.info("🔐 **Azure Authentication:** Click Sign In below, then open https://microsoft.com/devicelogin in your browser and enter the code to authenticate. No admin consent required.")
+            # ── MICROSOFT FABRIC CONNECTOR ───────────────────────────
+            st.markdown("Enter your Fabric table name and columns below. The AI will analyze them to identify Critical Data Elements.")
 
-            # Step 1: Start device code flow
-            if st.button("🔐 Sign In (get code)", key="ai_device_code_btn", type="secondary"):
-                try:
-                    connector = _FC(t_id or "", c_id or "", c_sec or "")
-                    flow = connector.start_device_code_flow(scope="https://analysis.windows.net/powerbi/api/.default offline_access")
-                    st.session_state.ai_device_code_flow = flow
-                    st.session_state.ai_device_code_authenticated = False
-                    st.session_state.ai_device_code_token = None
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"❌ {e}")
+            fabric_table = st.text_input(
+                "Table Name",
+                placeholder="e.g. Sales_Transactions",
+                value=st.session_state.ai_state["f_tab_text"],
+                key="ai_f_tab_text_ref",
+                on_change=sync_ai_f_tab_text,
+            )
 
-            # Step 2: Show code and poll
-            flow = st.session_state.get('ai_device_code_flow')
-            fabric_table = None
+            manual_cols = st.text_area(
+                "Column Names (comma-separated)",
+                placeholder="e.g. CustomerID, FirstName, LastName, Email, PhoneNumber, SSN, AccountBalance, TransactionDate",
+                height=100,
+                key="ai_manual_cols_input",
+            )
 
-            if flow and not st.session_state.get('ai_device_code_authenticated'):
-                user_code = flow.get("user_code", "")
-                st.markdown("""
-                ### 🔐 Azure Authentication
-                To sign in, open **[https://microsoft.com/devicelogin](https://microsoft.com/devicelogin)** and enter the code below to authenticate.
-                """)
-                st.code(user_code, language=None)
-                st.markdown("After signing in, click **Verify & Browse Workspaces** below.")
+            if manual_cols:
+                cols_list = [c.strip() for c in manual_cols.split(",") if c.strip()]
+                if cols_list:
+                    st.session_state.ai_discovered_cols = cols_list
+                    st.markdown(f"**{len(cols_list)} columns entered**")
 
-                if st.button("✅ Verify & Browse Workspaces", key="ai_verify_device_btn", type="primary"):
-                    with st.spinner("Verifying sign-in..."):
-                        try:
-                            connector = _FC(t_id or "", c_id or "", c_sec or "")
-                            token = connector.poll_device_code(
-                                flow["device_code"],
-                                interval=flow.get("interval", 5),
-                                timeout=10,
-                                _flow=flow
-                            )
-                            st.session_state.ai_device_code_token = token
-                            st.session_state.ai_device_code_authenticated = True
-                            connector.token = token
+            # Optional: Device Code sign-in (requires admin consent in most organizations)
+            with st.expander("🔐 Advanced: Sign in with Azure (requires admin consent)", expanded=False):
+                st.warning("Device Code authentication requires your Azure AD admin to have granted consent. If you see an admin approval error, use the manual entry above instead.")
 
-                            # Use REST API to list workspaces (HTTPS only, no port 1433)
-                            workspaces = connector.list_workspaces()
-                            st.session_state.ai_fabric_workspaces = workspaces
-                            st.session_state.ai_device_code_flow = None
-                            if workspaces:
-                                st.success(f"✅ Signed in! Found {len(workspaces)} workspace(s).")
-                            else:
-                                st.warning("Signed in but no workspaces found.")
-                            st.rerun()
-                        except Exception as e:
-                            err_msg = str(e)
-                            if "authorization_pending" in err_msg:
-                                st.warning("⏳ Still waiting for sign-in. Complete the steps above, then click Verify again.")
-                            else:
-                                st.error(f"❌ {err_msg}")
+                col_ep, col_db = st.columns([3, 1])
+                with col_ep:
+                    _default_ep = st.session_state.ai_state["f_sql"] or creds.get('fabric_sql_endpoint', '')
+                    f_sql = st.text_input(
+                        "SQL Analytics Endpoint",
+                        value=_default_ep,
+                        placeholder="xxxx.datawarehouse.fabric.microsoft.com",
+                        key="ai_f_sql_input",
+                        on_change=sync_ai_f_sql,
+                    )
+                with col_db:
+                    _default_db = st.session_state.ai_state.get("f_db", "") or "w1"
+                    f_db = st.text_input(
+                        "Database Name",
+                        value=_default_db,
+                        placeholder="e.g. w1",
+                        key="ai_f_db_input",
+                        on_change=sync_ai_f_db,
+                    )
 
-            elif st.session_state.get('ai_device_code_authenticated'):
-                st.success("✅ Signed in with Microsoft account.")
+                if st.button("🔐 Sign In (get code)", key="ai_device_code_btn", type="secondary"):
+                    try:
+                        connector = _FC(t_id or "", c_id or "", c_sec or "")
+                        flow = connector.start_device_code_flow(scope="https://analysis.windows.net/powerbi/api/.default offline_access")
+                        st.session_state.ai_device_code_flow = flow
+                        st.session_state.ai_device_code_authenticated = False
+                        st.session_state.ai_device_code_token = None
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"❌ {e}")
 
-                # Workspace selector
-                workspaces = st.session_state.get('ai_fabric_workspaces', [])
-                if workspaces:
-                    ws_labels = [ws.get('displayName', ws.get('id', 'Unknown')) for ws in workspaces]
-                    ws_sel = st.selectbox("Select Workspace", ws_labels, key="ai_device_ws_sel")
-                    ws_idx = ws_labels.index(ws_sel)
-                    selected_ws = workspaces[ws_idx]
-                    ws_id = selected_ws.get("id", "")
+                flow = st.session_state.get('ai_device_code_flow')
+                if flow and not st.session_state.get('ai_device_code_authenticated'):
+                    user_code = flow.get("user_code", "")
+                    st.markdown("**Open [https://microsoft.com/devicelogin](https://microsoft.com/devicelogin) and enter:**")
+                    st.code(user_code, language=None)
 
-                    # Auto-load items when workspace changes
-                    if st.session_state.get('_prev_device_ws') != ws_id:
-                        st.session_state._prev_device_ws = ws_id
-                        st.session_state.ai_device_items = []
-                        st.session_state.ai_fabric_tables = []
-                        try:
-                            connector = _FC(t_id or "", c_id or "", c_sec or "")
-                            connector.token = st.session_state.ai_device_code_token
-                            items = connector.list_data_items(ws_id)
-                            st.session_state.ai_device_items = items
-                        except Exception as ei:
-                            st.warning(f"Could not load items: {ei}")
+                    if st.button("✅ Verify & Browse Workspaces", key="ai_verify_device_btn", type="primary"):
+                        with st.spinner("Verifying sign-in..."):
+                            try:
+                                connector = _FC(t_id or "", c_id or "", c_sec or "")
+                                token = connector.poll_device_code(
+                                    flow["device_code"],
+                                    interval=flow.get("interval", 5),
+                                    timeout=10,
+                                    _flow=flow
+                                )
+                                st.session_state.ai_device_code_token = token
+                                st.session_state.ai_device_code_authenticated = True
+                                connector.token = token
+                                workspaces = connector.list_workspaces()
+                                st.session_state.ai_fabric_workspaces = workspaces
+                                st.session_state.ai_device_code_flow = None
+                                if workspaces:
+                                    st.success(f"✅ Signed in! Found {len(workspaces)} workspace(s).")
+                                else:
+                                    st.warning("Signed in but no workspaces found.")
+                                st.rerun()
+                            except Exception as e:
+                                err_msg = str(e)
+                                if "authorization_pending" in err_msg:
+                                    st.warning("⏳ Still waiting. Complete sign-in above, then click Verify again.")
+                                elif "admin" in err_msg.lower() or "AADSTS65001" in err_msg or "consent" in err_msg.lower():
+                                    st.error("❌ Admin consent required. Your Azure AD admin must approve this app. Use manual column entry above instead.")
+                                    st.session_state.ai_device_code_flow = None
+                                else:
+                                    st.error(f"❌ {err_msg}")
 
-                    # Item selector
-                    items = st.session_state.get('ai_device_items', [])
-                    if items:
-                        item_labels = [f"{it.get('displayName', '')} ({it.get('type', '')})" for it in items]
-                        item_sel = st.selectbox("Select Lakehouse / Warehouse", item_labels, key="ai_device_item_sel")
-                        item_idx = item_labels.index(item_sel)
-                        selected_item = items[item_idx]
-                        item_id = selected_item.get("id", "")
-                        item_type = selected_item.get("type", "Lakehouse")
+                elif st.session_state.get('ai_device_code_authenticated'):
+                    st.success("✅ Signed in with Microsoft account.")
+                    workspaces = st.session_state.get('ai_fabric_workspaces', [])
+                    if workspaces:
+                        ws_labels = [ws.get('displayName', ws.get('id', 'Unknown')) for ws in workspaces]
+                        ws_sel = st.selectbox("Select Workspace", ws_labels, key="ai_device_ws_sel")
+                        ws_idx = ws_labels.index(ws_sel)
+                        selected_ws = workspaces[ws_idx]
+                        ws_id = selected_ws.get("id", "")
 
-                        # Auto-load tables when item changes
-                        if st.session_state.get('_prev_device_item') != item_id:
-                            st.session_state._prev_device_item = item_id
+                        if st.session_state.get('_prev_device_ws') != ws_id:
+                            st.session_state._prev_device_ws = ws_id
+                            st.session_state.ai_device_items = []
                             st.session_state.ai_fabric_tables = []
                             try:
                                 connector = _FC(t_id or "", c_id or "", c_sec or "")
                                 connector.token = st.session_state.ai_device_code_token
-                                tables = connector.list_tables_via_api(ws_id, item_id, item_type=item_type)
-                                st.session_state.ai_fabric_tables = tables
-                            except Exception as et:
-                                st.warning(f"Could not load tables: {et}")
+                                items = connector.list_data_items(ws_id)
+                                st.session_state.ai_device_items = items
+                            except Exception as ei:
+                                st.warning(f"Could not load items: {ei}")
 
-                        # Table selector
-                        fabric_tables = st.session_state.get('ai_fabric_tables', [])
-                        if fabric_tables:
-                            tab_options = ["--- Select Table ---"] + fabric_tables
-                            saved_tab = st.session_state.ai_state.get("f_tab_sel", "--- Select Table ---")
-                            tab_idx = tab_options.index(saved_tab) if saved_tab in tab_options else 0
-                            fabric_table_sel = st.selectbox("Select Table", tab_options, index=tab_idx,
-                                                            key="ai_f_tab_sel_ref", on_change=sync_ai_f_tab_sel)
-                            fabric_table = fabric_table_sel if fabric_table_sel != "--- Select Table ---" else None
-                        else:
-                            fabric_table = st.text_input("Table Name (manual)",
-                                                         placeholder="e.g. Sales_Transactions",
-                                                         value=st.session_state.ai_state["f_tab_text"],
-                                                         key="ai_f_tab_text_ref", on_change=sync_ai_f_tab_text)
-                    else:
-                        fabric_table = st.text_input("Table Name",
-                                                     placeholder="e.g. Sales_Transactions",
-                                                     value=st.session_state.ai_state["f_tab_text"],
-                                                     key="ai_f_tab_text_ref", on_change=sync_ai_f_tab_text)
-                else:
-                    fabric_table = st.text_input("Table Name",
-                                                 placeholder="e.g. Sales_Transactions",
-                                                 value=st.session_state.ai_state["f_tab_text"],
-                                                 key="ai_f_tab_text_ref", on_change=sync_ai_f_tab_text)
-            else:
-                fabric_table = st.text_input("Table Name (sign in first to auto-discover)",
-                                             placeholder="e.g. Sales_Transactions",
-                                             value=st.session_state.ai_state["f_tab_text"],
-                                             key="ai_f_tab_text_ref", on_change=sync_ai_f_tab_text)
+                        items = st.session_state.get('ai_device_items', [])
+                        if items:
+                            item_labels = [f"{it.get('displayName', '')} ({it.get('type', '')})" for it in items]
+                            item_sel = st.selectbox("Select Lakehouse / Warehouse", item_labels, key="ai_device_item_sel")
+                            item_idx = item_labels.index(item_sel)
+                            selected_item = items[item_idx]
+                            item_id = selected_item.get("id", "")
+                            item_type = selected_item.get("type", "Lakehouse")
 
-        # Column discovery (best-effort; AI infers if unavailable)
+                            if st.session_state.get('_prev_device_item') != item_id:
+                                st.session_state._prev_device_item = item_id
+                                st.session_state.ai_fabric_tables = []
+                                try:
+                                    connector = _FC(t_id or "", c_id or "", c_sec or "")
+                                    connector.token = st.session_state.ai_device_code_token
+                                    tables = connector.list_tables_via_api(ws_id, item_id, item_type=item_type)
+                                    st.session_state.ai_fabric_tables = tables
+                                except Exception as et:
+                                    st.warning(f"Could not load tables: {et}")
+
+                            fabric_tables_list = st.session_state.get('ai_fabric_tables', [])
+                            if fabric_tables_list:
+                                tab_options = ["--- Select Table ---"] + fabric_tables_list
+                                saved_tab = st.session_state.ai_state.get("f_tab_sel", "--- Select Table ---")
+                                tab_idx = tab_options.index(saved_tab) if saved_tab in tab_options else 0
+                                fabric_table_sel = st.selectbox("Select Table", tab_options, index=tab_idx,
+                                                                key="ai_f_tab_sel_ref", on_change=sync_ai_f_tab_sel)
+                                if fabric_table_sel != "--- Select Table ---":
+                                    fabric_table = fabric_table_sel
+
+        # Column discovery (best-effort)
         user_token = st.session_state.get('ai_device_code_token')
         if fabric_table and st.session_state.get('prev_ai_f_tab') != fabric_table:
-            with st.spinner(f"Discovering columns for '{fabric_table}'..."):
-                try:
-                    # Try REST-based discovery if device code token and item context available
-                    ws_id_col = st.session_state.get('_prev_device_ws', '')
-                    item_id_col = st.session_state.get('_prev_device_item', '')
-                    if user_token and ws_id_col and item_id_col:
-                        connector = _FC(t_id or "", c_id or "", c_sec or "")
-                        connector.token = user_token
-                        it_type = "Lakehouse"
-                        for it in st.session_state.get('ai_device_items', []):
-                            if it.get("id") == item_id_col:
-                                it_type = it.get("type", "Lakehouse")
-                                break
-                        schema = connector.fetch_table_schema_via_api(ws_id_col, item_id_col, fabric_table, item_type=it_type)
-                        st.session_state.ai_discovered_cols = [c['name'] for c in schema] if schema else []
-                    else:
-                        # Fallback: try SQL if endpoint available
-                        f_sql_val = st.session_state.ai_state.get("f_sql", "")
-                        f_db_val = st.session_state.ai_state.get("f_db") or None
-                        if f_sql_val:
-                            schema = _FC(t_id or "", c_id or "", c_sec or "").fetch_table_schema(
-                                f_sql_val, fabric_table, database_name=f_db_val, sql_access_token=user_token)
+            # Only auto-discover if we have a token + item context and no manual cols
+            if not st.session_state.get('ai_discovered_cols'):
+                with st.spinner(f"Discovering columns for '{fabric_table}'..."):
+                    try:
+                        ws_id_col = st.session_state.get('_prev_device_ws', '')
+                        item_id_col = st.session_state.get('_prev_device_item', '')
+                        if user_token and ws_id_col and item_id_col:
+                            connector = _FC(t_id or "", c_id or "", c_sec or "")
+                            connector.token = user_token
+                            it_type = "Lakehouse"
+                            for it in st.session_state.get('ai_device_items', []):
+                                if it.get("id") == item_id_col:
+                                    it_type = it.get("type", "Lakehouse")
+                                    break
+                            schema = connector.fetch_table_schema_via_api(ws_id_col, item_id_col, fabric_table, item_type=it_type)
                             st.session_state.ai_discovered_cols = [c['name'] for c in schema] if schema else []
                         else:
-                            st.session_state.ai_discovered_cols = []
-                except Exception:
-                    st.session_state.ai_discovered_cols = []
-                st.session_state.prev_ai_f_tab = fabric_table
+                            f_sql_val = st.session_state.ai_state.get("f_sql", "")
+                            f_db_val = st.session_state.ai_state.get("f_db") or None
+                            if f_sql_val:
+                                schema = _FC(t_id or "", c_id or "", c_sec or "").fetch_table_schema(
+                                    f_sql_val, fabric_table, database_name=f_db_val, sql_access_token=user_token)
+                                st.session_state.ai_discovered_cols = [c['name'] for c in schema] if schema else []
+                    except Exception:
+                        pass
+            st.session_state.prev_ai_f_tab = fabric_table
 
     # Business Requirement Input (optional when file is uploaded)
     req_placeholder = "Optional when a file is uploaded. Add business context for more targeted results, e.g. 'GDPR compliance for European customers'."
