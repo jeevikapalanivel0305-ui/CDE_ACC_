@@ -77,25 +77,37 @@ class FabricConnector:
     # =========================================================
     # DEVICE CODE FLOW (Interactive User Auth)
     # =========================================================
-    def start_device_code_flow(self, scope="https://api.fabric.microsoft.com/.default"):
-        """Initiate device code flow. Returns dict with 'user_code', 'verification_uri', 'device_code', 'interval'."""
-        url = f"https://login.microsoftonline.com/{self.tenant_id}/oauth2/v2.0/devicecode"
+    def start_device_code_flow(self, scope="https://database.windows.net/user_impersonation offline_access"):
+        """Initiate device code flow. Returns dict with 'user_code', 'verification_uri', 'device_code', 'interval'.
+        Uses /common authority and Azure CLI public client if no tenant/client provided."""
+        # Use /common and Azure CLI public client ID if tenant/client not set
+        tenant = self.tenant_id if self.tenant_id else "common"
+        client = self.client_id if self.client_id else "04b07795-a710-4532-a957-3b6867d34e34"
+        
+        url = f"https://login.microsoftonline.com/{tenant}/oauth2/v2.0/devicecode"
         payload = {
-            "client_id": self.client_id,
+            "client_id": client,
             "scope": scope,
         }
         resp = requests.post(url, data=payload, timeout=30)
         if resp.status_code == 200:
-            return resp.json()
+            data = resp.json()
+            data["_client_id"] = client  # store for polling
+            data["_tenant"] = tenant
+            return data
         raise Exception(f"Device code request failed: {resp.json().get('error_description', resp.text)}")
 
-    def poll_device_code(self, device_code, interval=5, timeout=300):
+    def poll_device_code(self, device_code, interval=5, timeout=300, _flow=None):
         """Poll for device code completion. Returns access_token or raises on failure."""
         import time
-        url = f"https://login.microsoftonline.com/{self.tenant_id}/oauth2/v2.0/token"
+        # Use stored tenant/client from flow if available
+        tenant = self.tenant_id if self.tenant_id else (_flow.get("_tenant", "common") if _flow else "common")
+        client = self.client_id if self.client_id else (_flow.get("_client_id", "04b07795-a710-4532-a957-3b6867d34e34") if _flow else "04b07795-a710-4532-a957-3b6867d34e34")
+        
+        url = f"https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token"
         payload = {
             "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
-            "client_id": self.client_id,
+            "client_id": client,
             "device_code": device_code,
         }
         elapsed = 0

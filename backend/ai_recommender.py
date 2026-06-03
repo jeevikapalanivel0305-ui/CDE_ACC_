@@ -447,18 +447,15 @@ def render_ai_recommend():
 
             # Step 1: Start device code flow
             if st.button("🔐 Sign In (get code)", key="ai_device_code_btn", type="secondary"):
-                if not t_id or not c_id:
-                    st.error("❌ Tenant ID and Client ID are required.")
-                else:
-                    try:
-                        connector = _FC(t_id, c_id, c_sec or "dummy")
-                        flow = connector.start_device_code_flow(scope="https://database.windows.net/user_impersonation offline_access")
-                        st.session_state.ai_device_code_flow = flow
-                        st.session_state.ai_device_code_authenticated = False
-                        st.session_state.ai_device_code_token = None
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"❌ {e}")
+                try:
+                    connector = _FC(t_id or "", c_id or "", c_sec or "")
+                    flow = connector.start_device_code_flow(scope="https://database.windows.net/user_impersonation offline_access")
+                    st.session_state.ai_device_code_flow = flow
+                    st.session_state.ai_device_code_authenticated = False
+                    st.session_state.ai_device_code_token = None
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"❌ {e}")
 
             # Step 2: Show code and poll
             flow = st.session_state.get('ai_device_code_flow')
@@ -483,11 +480,12 @@ def render_ai_recommend():
                     else:
                         with st.spinner("Verifying sign-in and fetching tables..."):
                             try:
-                                connector = _FC(t_id, c_id, c_sec or "dummy")
+                                connector = _FC(t_id or "", c_id or "", c_sec or "")
                                 token = connector.poll_device_code(
                                     flow["device_code"],
                                     interval=flow.get("interval", 5),
-                                    timeout=10  # short poll — user should have signed in already
+                                    timeout=10,  # short poll — user should have signed in already
+                                    _flow=flow
                                 )
                                 st.session_state.ai_device_code_token = token
                                 st.session_state.ai_device_code_authenticated = True
